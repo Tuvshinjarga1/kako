@@ -53,7 +53,7 @@ def crawl_and_scrape(start_url: str):
             continue
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        title = soup.title.string.strip() if soup.title else url
+        title = soup.title.string.strip() if soup.title and soup.title.string else url
         body, images = extract_content(soup, url)
 
         results.append({
@@ -146,7 +146,7 @@ def scrape_single(url: str):
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-    title = soup.title.string.strip() if soup.title else url
+    title = soup.title.string.strip() if soup.title and soup.title.string else url
     body, images = extract_content(soup, url)
     return {"url": url, "title": title, "body": body, "images": images}
 
