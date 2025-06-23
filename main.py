@@ -5,12 +5,12 @@ import requests
 from openai import OpenAI
 import json
 from urllib.parse import urljoin, urlparse
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string, send_from_directory
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import Dict, Optional
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='.', static_url_path='/static')
 logging.basicConfig(level=logging.INFO)
 
 # —— Config —— #
@@ -368,6 +368,40 @@ def mark_conversation_resolved(conv_id: int):
 
 
 # —— API Endpoints —— #
+@app.route("/", methods=["GET"])
+def index():
+    """Serve the main HTML page with Chatwoot widget"""
+    html_content = """<!DOCTYPE html>
+<html lang="mn">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chatwoot Widget</title>
+    <script>
+      (function (d, t) {
+        var BASE_URL = "https://app.chatwoot.com";
+        var g = d.createElement(t),
+          s = d.getElementsByTagName(t)[0];
+        g.src = BASE_URL + "/packs/js/sdk.js";
+        g.defer = true;
+        g.async = true;
+        s.parentNode.insertBefore(g, s);
+        g.onload = function () {
+          window.chatwootSDK.run({
+            websiteToken: "HEpoGsGiY59Tqew6S4yhZbnf",
+            baseUrl: BASE_URL,
+          });
+        };
+      })(document, "script");
+    </script>
+  </head>
+  <body>
+    <h1>Баруун доор kako.mn AI chatbot-ын хэсэг байна...</h1>
+    <!-- Chatwoot widget автоматаар энд гарч ирнэ -->
+  </body>
+</html>"""
+    return html_content
+
 @app.route("/api/scrape", methods=["POST"])
 def api_scrape():
     data = request.get_json(force=True)

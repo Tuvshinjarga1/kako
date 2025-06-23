@@ -14,5 +14,5 @@ COPY . .
 # Порт нээх
 EXPOSE 8000
 
-# Gunicorn + Uvicorn Worker ашиглан FastAPI app ажиллуулах
-CMD ["gunicorn", "main:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+# Gunicorn ашиглан Flask app ажиллуулах
+CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:8000", "--workers", "4"]
