@@ -8,11 +8,6 @@ from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from datetime import datetime
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import re
-import random
 from typing import Dict, Optional
 
 app = Flask(__name__)
@@ -22,19 +17,12 @@ logging.basicConfig(level=logging.INFO)
 ROOT_URL             = os.getenv("ROOT_URL", "https://kako.mn/")
 DELAY_SEC            = float(os.getenv("DELAY_SEC", "0.5"))
 ALLOWED_NETLOC       = urlparse(ROOT_URL).netloc
-MAX_CRAWL_PAGES      = int(os.getenv("MAX_CRAWL_PAGES", "50"))
+MAX_CRAWL_PAGES      = int(os.getenv("MAX_CRAWL_PAGES", "100"))
 CHATWOOT_API_KEY     = os.getenv("CHATWOOT_API_KEY")
 ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
-CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
+CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://kako.mn/")
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
-
-# SMTP тохиргоо
-SMTP_SERVER          = os.getenv("SMTP_SERVER")
-SMTP_PORT            = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USERNAME        = os.getenv("SENDER_EMAIL")
-SMTP_PASSWORD        = os.getenv("SENDER_PASSWORD")
-SMTP_FROM_EMAIL      = os.getenv("SENDER_EMAIL")
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -189,32 +177,42 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
             context = "\n\n".join(relevant_pages)
     
     # Build system message with context
-    system_content = """Та Cloud.mn-ийн баримт бичгийн талаар асуултад хариулдаг Монгол AI туслах юм. 
-    Хэрэглэгчтэй монгол хэлээр ярилцаарай. Хариултаа товч бөгөөд ойлгомжтой байлгаарай.
+    system_content = """Та онлайн дэлгүүрийн AI туслах бот юм. Хэрэглэгчдэд бүтээгдэхүүний мэдээлэл, үнэ, дэлгэрэнгүй мэдээлэл хайж олоход тусалдаг.
+    Хэрэглэгчтэй монгол хэлээр найрсаг, тусламжтай ярилцаарай.
     
     ЭНГИЙН МЭНДЧИЛГЭЭНИЙ ТУХАЙ:
     Хэрэв хэрэглэгч энгийн мэндчилгээ хийж байвал (жишээ: "сайн байна уу", "сайн уу", "мэнд", "hello", "hi", "сайн уу байна", "hey", "sn bnu", "snu" гэх мэт), дараах байдлаар хариулаарай:
     
-    "Сайн байна уу! 👋 Би Cloud.mn-ийн AI туслах юм. Танд хэрхэн туслах вэ?
+    "Сайн байна уу! 🛍️ Би танай онлайн дэлгүүрийн AI туслах юм. Танд хэрхэн туслах вэ?
     
     Би дараах зүйлсээр танд туслаж чадна:
-    • 📚 Cloud.mn баримт бичгээс мэдээлэл хайх
-    • ❓ Техникийн асуултад хариулах  
-    • 💬 Ерөнхий зөвлөгөө өгөх
+    • 🔍 Бүтээгдэхүүн хайх болон олох
+    • 💰 Үнийн мэдээлэл өгөх  
+    • 📝 Бүтээгдэхүүний дэлгэрэнгүй мэдээлэл
+    • 🛒 Худалдан авалтын зөвлөгөө
+    • 📞 Холбоо барих мэдээлэл
     
-    Асуултаа чөлөөтэй асуугаарай!"
+    Хайж байгаа бүтээгдэхүүнээ хэлээрэй эсвэл асуултаа чөлөөтэй асуугаарай!"
     
-    Хариулахдаа дараах зүйлсийг анхаарна уу:
-    1. Хариултаа холбогдох баримт бичгийн линкээр дэмжүүлээрэй
-    2. Хэрэв ойлгомжгүй бол тодорхой асууна уу
-    3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
-    4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
+    БҮТЭЭГДЭХҮҮН ХАЙХ ЗАА ЗААВАР:
+    1. Хэрэглэгч бүтээгдэхүүн хайж байвал, холбогдох бүтээгдэхүүний мэдээллийг хайж олоорой
+    2. Үнэ, загвар, өнгө, хэмжээ зэрэг дэлгэрэнгүй мэдээллийг өгөөрэй
+    3. Хэрэв олон төстэй бүтээгдэхүүн байвал, тэдгээрийг жагсааж харьцуулга хийж өгөөрэй
+    4. Бүтээгдэхүүний зургийг байвал дурдаарай
+    5. Худалдан авах холбоос эсвэл холбоо барих мэдээллийг өгөөрэй
     
-    Хэрэглэгчийн хүсэлтийг автоматаар таньж, дараах үйлдлүүдийг хийх боломжтой:
-    - Хэрэглэгч мэдээлэл хайхыг хүсвэл, холбогдох мэдээллийг хайж олж хариулна
-    - Хэрэглэгч тодорхой хуудсыг шүүрдэхийг хүсвэл, тухайн хуудсыг шүүрдэж хариулна
-    - Хэрэглэгч тусламж хүсвэл, боломжтой үйлдлүүдийн талаар тайлбарлана
-    - Хэрэглэгч бүх сайтыг шүүрдэхийг хүсвэл, шүүрдэлтийг эхлүүлнэ"""
+    ХАРИУЛТЫН ЗАГВАР:
+    - Эхлээд тухайн бүтээгдэхүүний нэр болон товч тайлбарыг өгөөрэй
+    - Үнэ болон боломжтой сонголтуудыг (өнгө, хэмжээ г.м) дурдаарай  
+    - Онцлог шинж чанарууд болон давуу талуудыг тайлбарлаарай
+    - Хэрэв байвал холбогдох линк эсвэл холбоо барих мэдээллийг өгөөрэй
+    - Найрсаг, худалдааны амжилттай хэв маягаар хариулаарай
+    
+    ТУСГАЙ ТОХИОЛДЛУУД:
+    - Хэрэв тухайн бүтээгдэхүүн олдохгүй бол, ижил төстэй бүтээгдэхүүн санал болгооройй
+    - Үнийн асуултад тодорхой хариулт өгөөрөй
+    - Хэрэглэгчийн сонирхлын дагуу нэмэлт санал болгооройй
+    - Худалдан авах процессын талаар тайлбарлаж өгөөрөй"""
     
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
@@ -410,135 +408,6 @@ def chatwoot_webhook():
     # Get conversation history
     history = conversation_memory.get(conv_id, [])
     
-    # Check if this is an email address
-    if "@" in text and is_valid_email(text.strip()):
-        # Store email for confirmation
-        if conv_id not in conversation_memory:
-            conversation_memory[conv_id] = []
-        conversation_memory[conv_id].append({
-            "role": "system", 
-            "content": f"pending_email:{text.strip()}"
-        })
-        
-        response = f"📧 Таны оруулсан имэйл хаяг: {text.strip()}\n\nТа дахин шалгана уу, зөв бол 'y' буруу бол 'n' гэж бичнэ үү."
-        send_to_chatwoot(conv_id, response)
-        return jsonify({"status": "success"}), 200
-    
-    # Check if user is confirming email with 'tiim' or 'ugui'
-    if text.lower() in ['tiim', 'тийм', 'yes', 'y']:
-        # Look for pending email
-        pending_email = None
-        for msg in history:
-            if msg.get("role") == "system" and "pending_email:" in msg.get("content", ""):
-                pending_email = msg.get("content").split(":")[1]
-                break
-        
-        if pending_email:
-            verification_code = send_verification_email(pending_email)
-            if verification_code:
-                # Remove pending email and add verification code
-                conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
-                                               if not (msg.get("role") == "system" and "pending_email:" in msg.get("content", ""))]
-                conversation_memory[conv_id].append({
-                    "role": "system", 
-                    "content": f"verification_code:{verification_code},email:{pending_email}"
-                })
-                
-                response = "📧 Таны имэйл хаяг руу баталгаажуулах 6 оронтой код илгээлээ. Уг кодыг оруулна уу."
-                send_to_chatwoot(conv_id, response)
-                return jsonify({"status": "success"}), 200
-            else:
-                response = "❌ Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу эсвэл өөр имэйл хаяг оруулна уу."
-                send_to_chatwoot(conv_id, response)
-                return jsonify({"status": "success"}), 200
-        else:
-            response = "⚠️ Баталгаажуулах имэйл хаяг олдсонгүй. Эхлээд имэйл хаягаа оруулна уу."
-            send_to_chatwoot(conv_id, response)
-            return jsonify({"status": "success"}), 200
-    
-    # Check if user is rejecting email with 'ugui'
-    if text.lower() in ['ugui', 'үгүй', 'no', 'n']:
-        # Remove pending email
-        if conv_id in conversation_memory:
-            conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
-                                           if not (msg.get("role") == "system" and "pending_email:" in msg.get("content", ""))]
-        
-        response = "❌ Имэйл хаяг буруу байлаа. Зөв имэйл хаягаа дахин оруулна уу."
-        send_to_chatwoot(conv_id, response)
-        return jsonify({"status": "success"}), 200
-    
-    # Check if this is a verification code (6 digits)
-    if len(text) == 6 and text.isdigit():
-        verification_info = None
-        for msg in history:
-            if msg.get("role") == "system" and "verification_code:" in msg.get("content", ""):
-                verification_info = msg.get("content")
-                break
-        
-        if verification_info:
-            parts = verification_info.split(",")
-            stored_code = parts[0].split(":")[1]
-            email = parts[1].split(":")[1]
-            
-            # Count failed attempts
-            failed_attempts = sum(1 for msg in history 
-                                if msg.get("role") == "assistant" 
-                                and "❌ Баталгаажуулах код буруу байна" in msg.get("content", ""))
-            
-            if text == stored_code:
-                response = "✅ Баталгаажуулалт амжилттай! Одоо асуудлаа дэлгэрэнгүй бичнэ үү."
-                send_to_chatwoot(conv_id, response)
-                
-                conversation_memory[conv_id].append({
-                    "role": "system", 
-                    "content": f"verified_email:{email}"
-                })
-                return jsonify({"status": "success"}), 200
-            else:
-                # Handle failed verification attempts
-                if failed_attempts >= 2:  # Allow 3 total attempts (0, 1, 2)
-                    response = """❌ Баталгаажуулах кодыг 3 удаа буруу оруулсан тул шинэ код авах шаардлагатай. 
-                    
-Шинэ код авахын тулд имэйл хаягаа дахин оруулна уу."""
-                    send_to_chatwoot(conv_id, response)
-                    
-                    # Remove old verification code from memory
-                    conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
-                                                   if not (msg.get("role") == "system" and "verification_code:" in msg.get("content", ""))]
-                    return jsonify({"status": "success"}), 200
-                else:
-                    remaining_attempts = 2 - failed_attempts
-                    response = f"""❌ Баталгаажуулах код буруу байна. 
-                    
-Танд {remaining_attempts} удаа оролдох боломж үлдлээ. Имэйлээ шалгаж, зөв кодыг оруулна уу."""
-                    send_to_chatwoot(conv_id, response)
-                    return jsonify({"status": "success"}), 200
-        else:
-            # No verification code found in memory
-            response = """⚠️ Баталгаажуулах код олдсонгүй. 
-            
-Эхлээд имэйл хаягаа оруулж, баталгаажуулах код авна уу."""
-            send_to_chatwoot(conv_id, response)
-            return jsonify({"status": "success"}), 200
-    
-    # Check if user has verified email and is describing an issue
-    verified_email = None
-    for msg in history:
-        if msg.get("role") == "system" and "verified_email:" in msg.get("content", ""):
-            verified_email = msg.get("content").split(":")[1]
-            break
-    
-    if verified_email and len(text) > 15:  # User has verified email and writing detailed message
-        # Send confirmation email to user
-        confirmation_sent = send_confirmation_email(verified_email, text[:100] + "..." if len(text) > 100 else text)
-        
-        response = "✅ Таны асуудлыг хүлээн авлаа. Бид тантай удахгүй холбогдох болно. Баярлалаа!"
-        
-        if confirmation_sent:
-            response += "\n📧 Танд баталгаажуулах мэйл илгээлээ."
-        send_to_chatwoot(conv_id, response)
-        return jsonify({"status": "success"}), 200
-    
     # Try to answer with AI first
     ai_response = get_ai_response(text, conv_id, crawled_data)
     
@@ -557,11 +426,11 @@ def chatwoot_webhook():
     # If user was previously escalated but AI can answer this new question, respond with AI
     if was_previously_escalated and not needs_human_help:
         # AI can handle this new question even though user was escalated before
-        response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, имэйл хаягаа оруулж дэмжлэгийн багтай холбогдоно уу."
+        response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, дэмжлэгийн багтай холбогдоно уу."
         send_to_chatwoot(conv_id, response_with_note)
         return jsonify({"status": "success"}), 200
     
-    if needs_human_help and not verified_email:
+    if needs_human_help:
         # Mark this conversation as escalated
         if conv_id not in conversation_memory:
             conversation_memory[conv_id] = []
@@ -573,7 +442,7 @@ def chatwoot_webhook():
         # AI thinks it can't handle this properly, escalate to human
         escalation_response = """🤝 Би таны асуултад хангалттай хариулт өгч чадахгүй байна. Дэмжлэгийн багийн тусламж авахыг санал болгож байна.
 
-Тусламж авахын тулд имэйл хаягаа оруулна уу. Бид таны имэйл хаягийг баталгаажуулсны дараа асуудлыг шийдвэрлэх болно."""
+Тусламжийн баг удахгүй танд хариулт өгөх болно."""
         
         send_to_chatwoot(conv_id, escalation_response)
     else:
@@ -758,92 +627,10 @@ def health_check():
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "openai_configured": client is not None,
-            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
-            "smtp_configured": bool(SMTP_SERVER and SMTP_USERNAME and SMTP_PASSWORD)
+            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
         }
     })
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
-
-# —— Email Verification Functions —— #
-def is_valid_email(email: str) -> bool:
-    """Check if email format is valid"""
-    email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(email_regex, email))
-
-def send_verification_email(email: str) -> str:
-    """Send verification email with code and return the code"""
-    if not SMTP_FROM_EMAIL or not SMTP_PASSWORD or not SMTP_SERVER:
-        logging.error("SMTP credentials not configured")
-        return None
-        
-    # Generate verification code
-    verification_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
-    
-    # Create email
-    msg = MIMEMultipart()
-    msg['From'] = SMTP_FROM_EMAIL
-    msg['To'] = email
-    msg['Subject'] = "Cloud.mn баталгаажуулах код"
-    
-    body = f"""Сайн байна уу,
-
-Таны Cloud.mn-д хандсан хүсэлтийг баталгаажуулахын тулд доорх кодыг оруулна уу:
-
-{verification_code}
-
-Хэрэв та энэ хүсэлтийг илгээгээгүй бол мэдэгдэнэ үү.
-
-Хүндэтгэсэн,
-Cloud.mn тусламжийн үйлчилгээ"""
-    
-    msg.attach(MIMEText(body, 'plain'))
-    
-    try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        logging.info(f"Verification email sent to {email}")
-        return verification_code
-    except Exception as e:
-        logging.error(f"Failed to send verification email: {e}")
-        return None
-
-def send_confirmation_email(email: str, problem: str) -> bool:
-    """Send confirmation email after issue is sent to support team"""
-    if not SMTP_FROM_EMAIL or not SMTP_PASSWORD or not SMTP_SERVER:
-        logging.error("SMTP credentials not configured")
-        return False
-        
-    # Create email
-    msg = MIMEMultipart()
-    msg['From'] = SMTP_FROM_EMAIL
-    msg['To'] = email
-    msg['Subject'] = "Cloud.mn - Таны хүсэлтийг хүлээн авлаа"
-    
-    body = f"""Сайн байна уу,
-
-Таны "{problem}" асуудлыг тусламжийн баг руу амжилттай илгээлээ.
-
-Бид таны хүсэлтийг хүлээн авч, удахгүй танд хариу өгөх болно.
-
-Хүндэтгэсэн,
-Cloud.mn тусламжийн үйлчилгээ"""
-    
-    msg.attach(MIMEText(body, 'plain'))
-    
-    try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        logging.info(f"Confirmation email sent to {email}")
-        return True
-    except Exception as e:
-        logging.error(f"Failed to send confirmation email: {e}")
-        return False
