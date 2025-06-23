@@ -2,13 +2,20 @@ import os
 import time
 import logging
 import requests
-from openai import OpenAI
 import json
 from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify, render_template_string, send_from_directory
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import Dict, Optional
+
+# Groq AI client импорт
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+    logging.warning("Groq client not installed. Install with: pip install groq")
 
 app = Flask(__name__, static_folder='.', static_url_path='/static')
 logging.basicConfig(level=logging.INFO)
@@ -20,12 +27,12 @@ ALLOWED_NETLOC       = urlparse(ROOT_URL).netloc
 MAX_CRAWL_PAGES      = int(os.getenv("MAX_CRAWL_PAGES", "500"))
 CHATWOOT_API_KEY     = os.getenv("CHATWOOT_API_KEY")
 ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
-CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://kako.mn/")
-OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
+CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com/")
+GROQ_API_KEY         = os.getenv("GROQ_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
-# Initialize OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+# Initialize Groq client
+client = Groq(api_key=GROQ_API_KEY) if (GROQ_API_KEY and GROQ_AVAILABLE) else None
 
 # —— Memory Storage —— #
 conversation_memory = {}
@@ -153,10 +160,10 @@ def scrape_single(url: str):
 
 # —— AI Assistant Functions —— #
 def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
-    """Enhanced AI response with better context awareness"""
+    """Enhanced AI response with Groq's Llama models for better Mongolian support"""
     
     if not client:
-        return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
+        return "🔑 Groq API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
     
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
@@ -196,16 +203,16 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     
     БҮТЭЭГДЭХҮҮН ХАЙХ ЗАА ЗААВАР:
     1. Хэрэглэгч бүтээгдэхүүн хайж байвал, холбогдох бүтээгдэхүүний мэдээллийг хайж олоорой
-    2. Үнэ, загвар, өнгө, хэмжээ зэрэг дэлгэрэнгүй мэдээллийг өгөөрэй
-    3. Хэрэв олон төстэй бүтээгдэхүүн байвал, тэдгээрийг жагсааж харьцуулга хийж өгөөрэй
+    2. Үнэ, загвар, өнгө, хэмжээ зэрэг дэлгэрэнгүй мэдээллийг өгөөрөй
+    3. Хэрэв олон төстэй бүтээгдэхүүн байвал, тэдгээрийг жагсааж харьцуулга хийж өгөөрөй
     4. Бүтээгдэхүүний зургийг байвал дурдаарай
-    5. Худалдан авах холбоос эсвэл холбоо барих мэдээллийг өгөөрэй
+    5. Худалдан авах холбоос эсвэл холбоо барих мэдээллийг өгөөрөй
     
     ХАРИУЛТЫН ЗАГВАР:
-    - Эхлээд тухайн бүтээгдэхүүний нэр болон товч тайлбарыг өгөөрэй
+    - Эхлээд тухайн бүтээгдэхүүний нэр болон товч тайлбарыг өгөөрөй
     - Үнэ болон боломжтой сонголтуудыг (өнгө, хэмжээ г.м) дурдаарай  
     - Онцлог шинж чанарууд болон давуу талуудыг тайлбарлаарай
-    - Хэрэв байвал холбогдох линк эсвэл холбоо барих мэдээллийг өгөөрэй
+    - Хэрэв байвал холбогдох линк эсвэл холбоо барих мэдээллийг өгөөрөй
     - Найрсаг, худалдааны амжилттай хэв маягаар хариулаарай
     
     ТУСГАЙ ТОХИОЛДЛУУД:
@@ -217,27 +224,31 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
     
-    # Build conversation context
+    # Build conversation messages for Groq
     messages = [
         {
-            "role": "system", 
+            "role": "system",
             "content": system_content
         }
     ]
     
     # Add conversation history
     for msg in history[-4:]:  # Last 4 messages
-        messages.append(msg)
+        if msg.get("role") == "user":
+            messages.append({"role": "user", "content": msg["content"]})
+        elif msg.get("role") == "assistant":
+            messages.append({"role": "assistant", "content": msg["content"]})
     
     # Add current message
     messages.append({"role": "user", "content": user_message})
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="llama-3.3-70b-versatile",  # Groq's best model for Mongolian
             messages=messages,
-            max_tokens=500,  # Increased token limit for better responses
-            temperature=0.7
+            max_tokens=600,
+            temperature=0.7,
+            top_p=0.9
         )
         
         ai_response = response.choices[0].message.content
@@ -256,7 +267,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         return ai_response
         
     except Exception as e:
-        logging.error(f"OpenAI API алдаа: {e}")
+        logging.error(f"Groq API алдаа: {e}")
         return f"🔧 AI-тай холбогдоход саад гарлаа. Дараах зүйлсийг туршиж үзнэ үү:\n• Асуултаа дахин илгээнэ үү\n• Асуултаа тодорхой болгоно уу\n• Холбогдох мэдээллийг хайж үзнэ үү\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
@@ -487,9 +498,9 @@ def chatwoot_webhook():
 
 
 def should_escalate_to_human(user_message: str, search_results: list, ai_response: str, history: list) -> bool:
-    """AI evaluates its own response and decides if human help is needed"""
+    """AI evaluates its own response and decides if human help is needed using Groq"""
     
-    # Use AI to evaluate its own response quality
+    # Use Groq AI to evaluate its own response quality
     if not client:
         # Fallback without AI evaluation - be more lenient
         return len(user_message) > 50 and (not search_results or len(search_results) == 0)
@@ -510,46 +521,48 @@ def should_escalate_to_human(user_message: str, search_results: list, ai_respons
             context += "\n" + "\n".join(recent_messages)
     
     try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """Та өөрийн өгсөн хариултыг үнэлж, хэрэглэгчид хангалттай эсэхийг шийднэ.
+        messages = [
+            {
+                "role": "system",
+                "content": """Та өөрийн өгсөн хариултыг үнэлж, хэрэглэгчид хангалттай эсэхийг шийднэ.
 
 Дараах тохиолдлуудад л хүний ажилтны тусламж шаардлагатай:
 - Хэрэглэгч техникийн алдаа, тохиргооны асуудлаар тусламж хүсэж байгаа
-- Акаунт, төлбөр, хостинг, домэйн зэрэг Cloud.mn-ийн үйлчилгээтэй холбоотой асуудал
+- Акаунт, төлбөр, хостинг, домэйн зэрэг онлайн дэлгүүрийн үйлчилгээтэй холбоотой асуудал
 - Тусгай хүсэлт, гомдол, шуурхай тусламж хэрэгтэй асуудал
 - Хэрэглэгч өөрөө "ажилтныг хүсэж байна" гэж тодорхой хэлсэн тохиолдол
 - Миний хариулт нь хэрэглэгчийн асуултын үндсэн сэдвээс огт холдсон бол
 
 Дараах тохиолдлуудад хүний тусламж ШААРДЛАГАГҮЙ:
-- Энгийн мэдээлэл асуух (Cloud.mn docs-ийн тухай)
+- Энгийн мэдээлэл асуух (бүтээгдэхүүний тухай)
 - Ерөнхий зөвлөгөө авах
-- Техникийн мэдлэг судлах
+- Худалдан авах мэдлэг судлах
 - Би хангалттай хариулт өгч чадсан тохиолдол
 - Хэрэглэгч зүгээр л мэдээлэл хайж байгаа
 
 Өөрийнхөө хариултанд итгэлтэй байж, хэрэглэгч дахин асууж болно гэдгийг санаарай.
 
 Хариултаа зөвхөн 'YES' (хүний тусламж хэрэгтэй) эсвэл 'NO' (миний хариулт хангалттай) гэж өгнө үү."""
-                },
-                {
-                    "role": "user", 
-                    "content": context
-                }
-            ],
+            },
+            {
+                "role": "user", 
+                "content": context
+            }
+        ]
+        
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
             max_tokens=10,
             temperature=0.2
         )
         
         ai_decision = response.choices[0].message.content.strip().upper()
-        logging.info(f"AI self-evaluation for '{user_message[:30]}...': {ai_decision}")
+        logging.info(f"Groq self-evaluation for '{user_message[:30]}...': {ai_decision}")
         return ai_decision == "YES"
         
     except Exception as e:
-        logging.error(f"AI self-evaluation error: {e}")
+        logging.error(f"Groq self-evaluation error: {e}")
         # More lenient fallback - don't escalate by default
         return False
 
@@ -660,7 +673,7 @@ def health_check():
         "config": {
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
-            "openai_configured": client is not None,
+            "groq_configured": client is not None,
             "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
         }
     })

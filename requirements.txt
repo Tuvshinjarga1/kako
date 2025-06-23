@@ -1,6 +1,6 @@
 Flask
 requests
-openai
+groq
 beautifulsoup4
 python-dotenv
 gunicorn
