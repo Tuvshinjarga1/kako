@@ -242,10 +242,10 @@ def extract_images_from_chatwoot_message(message_data: dict) -> List[str]:
 # —— AI Assistant Functions —— #
 def get_ai_response(user_message: str, conversation_id: int, context_data: list = None, images: List[str] = None):
     """Enhanced AI response with OpenAI's GPT-4 Vision for text and image support"""
-    print("""Enhanced AI response with OpenAI's GPT-4 Vision for text and image support""" + images +  "imagesss")
+    print(f"Enhanced AI response called with user_message: '{user_message}', images: {images if images else 'None'}")
     
-    print(user_message)
-
+    print(f"User message: '{user_message}'")
+    
     if not client:
         return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
     
