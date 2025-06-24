@@ -246,6 +246,14 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     if not client:
         return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
     
+    # Handle empty or None messages
+    if not user_message and not images:
+        return "📝 Мессежийн агуулга алга байна. Асуултаа дахин илгээнэ үү эсвэл зураг оруулна уу."
+    
+    # Use default message for image-only requests
+    if not user_message and images:
+        user_message = "Энэ зургийг шинжилж тайлбарлаж өгнө үү?"
+    
     # Handle image analysis first if images are provided
     if images:
         image_responses = []
@@ -556,79 +564,93 @@ def chatwoot_webhook():
     if data.get("message_type") != "incoming":
         return jsonify({}), 200
 
-    conv_id = data["conversation"]["id"]
-    text = data.get("content", "").strip()
-    contact = data.get("conversation", {}).get("contact", {})
-    contact_name = contact.get("name", "Хэрэглэгч")
-    
-    # Extract images from message attachments
-    images = extract_images_from_chatwoot_message(data)
-    
-    if images:
-        logging.info(f"Received message with {len(images)} image(s) from {contact_name} in conversation {conv_id}: {text}")
-    else:
-        logging.info(f"Received text message from {contact_name} in conversation {conv_id}: {text}")
-    
-    # Get conversation history
-    history = conversation_memory.get(conv_id, [])
-    
-    # Try to answer with AI (including image analysis if images present)
-    ai_response = get_ai_response(text, conv_id, crawled_data, images)
-    
-    # Check if AI couldn't find good answer by searching crawled data
-    search_results = search_in_crawled_data(text, max_results=3) if text else []
-    
-    # Check if this user was previously escalated but asking a new question
-    was_previously_escalated = any(
-        msg.get("role") == "system" and "escalated_to_human" in msg.get("content", "")
-        for msg in history
-    )
-    
-    # Let AI evaluate its own response quality and decide if human help is needed
-    # Skip escalation check for image messages as AI can handle them well
-    needs_human_help = False
-    if not images:  # Only check for text messages
-        needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
-    
-    # If user was previously escalated but AI can answer this new question, respond with AI
-    if was_previously_escalated and not needs_human_help:
-        # AI can handle this new question even though user was escalated before
-        if images:
-            response_with_note = f"{ai_response}\n\n📸 Зургийг амжилттай шинжиллээ! Хэрэв нэмэлт асуулт байвал чөлөөтэй асуугаарай."
-        else:
-            response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, дэмжлэгийн багтай холбогдоно уу."
-        send_to_chatwoot(conv_id, response_with_note)
-        return jsonify({"status": "success"}), 200
-    
-    if needs_human_help:
-        # Mark this conversation as escalated
-        if conv_id not in conversation_memory:
-            conversation_memory[conv_id] = []
-        conversation_memory[conv_id].append({
-            "role": "system", 
-            "content": "escalated_to_human"
-        })
+    try:
+        conv_id = data["conversation"]["id"]
+        # Fix: Handle None values properly
+        content = data.get("content") or ""
+        text = content.strip() if isinstance(content, str) else ""
+        contact = data.get("conversation", {}).get("contact", {})
+        contact_name = contact.get("name", "Хэрэглэгч")
         
-        # AI thinks it can't handle this properly, escalate to human
-        escalation_response = """🤝 Би таны асуултад хангалттай хариулт өгч чадахгүй байна. Удахгүй таны асуултад ажилтан хариулт өгөх болно.
+        # Extract images from message attachments
+        images = extract_images_from_chatwoot_message(data)
+        
+        if images:
+            logging.info(f"Received message with {len(images)} image(s) from {contact_name} in conversation {conv_id}: {text}")
+        else:
+            logging.info(f"Received text message from {contact_name} in conversation {conv_id}: {text}")
+        
+        # Get conversation history
+        history = conversation_memory.get(conv_id, [])
+        
+        # Try to answer with AI (including image analysis if images present)
+        ai_response = get_ai_response(text, conv_id, crawled_data, images)
+        
+        # Check if AI couldn't find good answer by searching crawled data
+        search_results = search_in_crawled_data(text, max_results=3) if text else []
+        
+        # Check if this user was previously escalated but asking a new question
+        was_previously_escalated = any(
+            msg.get("role") == "system" and "escalated_to_human" in msg.get("content", "")
+            for msg in history
+        )
+        
+        # Let AI evaluate its own response quality and decide if human help is needed
+        # Skip escalation check for image messages as AI can handle them well
+        needs_human_help = False
+        if not images and text:  # Only check for text messages with content
+            needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
+        
+        # If user was previously escalated but AI can answer this new question, respond with AI
+        if was_previously_escalated and not needs_human_help:
+            # AI can handle this new question even though user was escalated before
+            if images:
+                response_with_note = f"{ai_response}\n\n📸 Зургийг амжилттай шинжиллээ! Хэрэв нэмэлт асуулт байвал чөлөөтэй асуугаарай."
+            else:
+                response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, дэмжлэгийн багтай холбогдоно уу."
+            send_to_chatwoot(conv_id, response_with_note)
+            return jsonify({"status": "success"}), 200
+        
+        if needs_human_help:
+            # Mark this conversation as escalated
+            if conv_id not in conversation_memory:
+                conversation_memory[conv_id] = []
+            conversation_memory[conv_id].append({
+                "role": "system", 
+                "content": "escalated_to_human"
+            })
+            
+            # AI thinks it can't handle this properly, escalate to human
+            escalation_response = """🤝 Би таны асуултад хангалттай хариулт өгч чадахгүй байна. Удахгүй таны асуултад ажилтан хариулт өгөх болно.
 
 Тусламжийн баг удахгүй танд хариулт өгөх болно."""
-        
-        send_to_chatwoot(conv_id, escalation_response)
-    else:
-        # AI is confident in its response, send it
-        if images:
-            # Add emoji to indicate image was processed
-            ai_response_with_icon = f"📸 {ai_response}"
-            send_to_chatwoot(conv_id, ai_response_with_icon)
+            
+            send_to_chatwoot(conv_id, escalation_response)
         else:
-            send_to_chatwoot(conv_id, ai_response)
+            # AI is confident in its response, send it
+            if images:
+                # Add emoji to indicate image was processed
+                ai_response_with_icon = f"📸 {ai_response}"
+                send_to_chatwoot(conv_id, ai_response_with_icon)
+            else:
+                send_to_chatwoot(conv_id, ai_response)
 
-    return jsonify({"status": "success"}), 200
+        return jsonify({"status": "success"}), 200
+        
+    except KeyError as e:
+        logging.error(f"Missing required field in webhook data: {e}")
+        return jsonify({"error": f"Missing required field: {e}"}), 400
+    except Exception as e:
+        logging.error(f"Webhook processing error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 def should_escalate_to_human(user_message: str, search_results: list, ai_response: str, history: list) -> bool:
     """AI evaluates its own response and decides if human help is needed using OpenAI"""
+    
+    # Handle empty parameters
+    if not user_message or not ai_response:
+        return False  # Don't escalate if no content to evaluate
     
     # Use OpenAI to evaluate its own response quality
     if not client:
