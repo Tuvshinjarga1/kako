@@ -1,6 +1,8 @@
 Flask
 requests
 groq
+openai
 beautifulsoup4
 python-dotenv
 gunicorn
+Pillow

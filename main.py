@@ -3,19 +3,22 @@ import time
 import logging
 import requests
 import json
+import base64
 from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify, render_template_string, send_from_directory
 from bs4 import BeautifulSoup
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+from PIL import Image
+import io
 
-# Groq AI client импорт
+# OpenAI client импорт
 try:
-    from groq import Groq
-    GROQ_AVAILABLE = True
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
 except ImportError:
-    GROQ_AVAILABLE = False
-    logging.warning("Groq client not installed. Install with: pip install groq")
+    OPENAI_AVAILABLE = False
+    logging.warning("OpenAI client not installed. Install with: pip install openai")
 
 app = Flask(__name__, static_folder='.', static_url_path='/static')
 logging.basicConfig(level=logging.INFO)
@@ -28,11 +31,11 @@ MAX_CRAWL_PAGES      = int(os.getenv("MAX_CRAWL_PAGES", "500"))
 CHATWOOT_API_KEY     = os.getenv("CHATWOOT_API_KEY")
 ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
 CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com/")
-GROQ_API_KEY         = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
-# Initialize Groq client
-client = Groq(api_key=GROQ_API_KEY) if (GROQ_API_KEY and GROQ_AVAILABLE) else None
+# Initialize OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OPENAI_AVAILABLE) else None
 
 # —— Memory Storage —— #
 conversation_memory = {}
@@ -158,12 +161,122 @@ def scrape_single(url: str):
     return {"url": url, "title": title, "body": body, "images": images}
 
 
+# —— Image Processing Functions —— #
+def encode_image_to_base64(image_url: str) -> Optional[str]:
+    """Download and encode image to base64"""
+    try:
+        response = requests.get(image_url, timeout=10)
+        response.raise_for_status()
+        
+        # Convert to base64
+        base64_image = base64.b64encode(response.content).decode('utf-8')
+        return base64_image
+    except Exception as e:
+        logging.error(f"Failed to encode image {image_url}: {e}")
+        return None
+
+def analyze_image_with_gpt4(image_data: str, user_question: str = "") -> str:
+    """Analyze image using GPT-4 Vision"""
+    if not client:
+        return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна."
+    
+    try:
+        messages = [
+            {
+                "role": "system",
+                "content": """Та онлайн дэлгүүрийн AI туслах бот юм. Хэрэглэгчээс ирсэн зургийг танин мэдэж, тухайн зургтай холбоотой бүтээгдэхүүний мэдээлэл, үнэ, онцлог шинж чанарыг монгол хэлээр тайлбарлаарай.
+
+ЗУРГИЙН ШИНЖИЛГЭЭНИЙ ЗААВАР:
+1. Зурагт юу харагдаж байгааг тодорхой дурдаарай
+2. Хэрэв бүтээгдэхүүн бол, нэр, загвар, өнгө, материалыг тайлбарлаарай
+3. Худалдан авах боломжтой эсэхийг дурдаарай
+4. Ижил төстэй бүтээгдэхүүн санал болгооройй
+5. Үнийн мэдээлэл байвал дурдаарай
+
+Найрсаг, тусламжтай хариулт өгөөрөй."""
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Энэ зургийг үзээд тайлбарлаж өгнө үү? {user_question}" if user_question else "Энэ зургийг үзээд тайлбарлаж өгнө үү?"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_data}"
+                        }
+                    }
+                ]
+            }
+        ]
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",  # Use GPT-4o for better vision and text capabilities
+            messages=messages,
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content
+        
+    except Exception as e:
+        logging.error(f"GPT-4 Vision error: {e}")
+        return f"🔧 Зургийг шинжлэхэд алдаа гарлаа: {str(e)[:100]}"
+
+def extract_images_from_chatwoot_message(message_data: dict) -> List[str]:
+    """Extract image URLs from Chatwoot message attachments"""
+    images = []
+    
+    # Check for attachments
+    attachments = message_data.get("attachments", [])
+    for attachment in attachments:
+        if attachment.get("file_type") and attachment["file_type"].startswith("image/"):
+            data_url = attachment.get("data_url")
+            if data_url:
+                images.append(data_url)
+    
+    return images
+
 # —— AI Assistant Functions —— #
-def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
-    """Enhanced AI response with Groq's Llama models for better Mongolian support"""
+def get_ai_response(user_message: str, conversation_id: int, context_data: list = None, images: List[str] = None):
+    """Enhanced AI response with OpenAI's GPT-4 Vision for text and image support"""
     
     if not client:
-        return "🔑 Groq API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
+        return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
+    
+    # Handle image analysis first if images are provided
+    if images:
+        image_responses = []
+        for image_url in images:
+            # Encode image to base64
+            base64_image = encode_image_to_base64(image_url)
+            if base64_image:
+                image_analysis = analyze_image_with_gpt4(base64_image, user_message)
+                image_responses.append(image_analysis)
+        
+        if image_responses:
+            combined_response = "\n\n".join(image_responses)
+            
+            # Store in memory
+            if conversation_id not in conversation_memory:
+                conversation_memory[conversation_id] = []
+            
+            conversation_memory[conversation_id].append({
+                "role": "user", 
+                "content": f"{user_message} [Зурагтай]"
+            })
+            conversation_memory[conversation_id].append({
+                "role": "assistant", 
+                "content": combined_response
+            })
+            
+            # Keep only last 8 messages
+            if len(conversation_memory[conversation_id]) > 8:
+                conversation_memory[conversation_id] = conversation_memory[conversation_id][-8:]
+                
+            return combined_response
     
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
@@ -198,8 +311,9 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     • 📝 Бүтээгдэхүүний дэлгэрэнгүй мэдээлэл
     • 🛒 Худалдан авалтын зөвлөгөө
     • 📞 Холбоо барих мэдээлэл
+    • 📸 Зураг танин бүтээгдэхүүн олох
     
-    Хайж байгаа бүтээгдэхүүнээ хэлээрэй эсвэл асуултаа чөлөөтэй асуугаарай!"
+    Хайж байгаа бүтээгдэхүүнээ хэлээрэй эсвэл зургийг илгээгээрэй!"
     
     БҮТЭЭГДЭХҮҮН ХАЙХ ЗАА ЗААВАР:
     1. Хэрэглэгч бүтээгдэхүүн хайж байвал, холбогдох бүтээгдэхүүний мэдээллийг хайж олоорой
@@ -224,7 +338,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
     
-    # Build conversation messages for Groq
+    # Build conversation messages for OpenAI
     messages = [
         {
             "role": "system",
@@ -244,11 +358,10 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # Groq's best model for Mongolian
+            model="gpt-4o",  # Use GPT-4o for better vision and text capabilities
             messages=messages,
             max_tokens=600,
             temperature=0.7,
-            top_p=0.9
         )
         
         ai_response = response.choices[0].message.content
@@ -267,7 +380,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         return ai_response
         
     except Exception as e:
-        logging.error(f"Groq API алдаа: {e}")
+        logging.error(f"OpenAI API алдаа: {e}")
         return f"🔧 AI-тай холбогдоход саад гарлаа. Дараах зүйлсийг туршиж үзнэ үү:\n• Асуултаа дахин илгээнэ үү\n• Асуултаа тодорхой болгоно уу\n• Холбогдох мэдээллийг хайж үзнэ үү\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
@@ -434,7 +547,7 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with AI integration"""
+    """Enhanced webhook with AI integration and image recognition"""
     global crawled_data, crawl_status
     
     data = request.json or {}
@@ -448,16 +561,22 @@ def chatwoot_webhook():
     contact = data.get("conversation", {}).get("contact", {})
     contact_name = contact.get("name", "Хэрэглэгч")
     
-    logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
+    # Extract images from message attachments
+    images = extract_images_from_chatwoot_message(data)
+    
+    if images:
+        logging.info(f"Received message with {len(images)} image(s) from {contact_name} in conversation {conv_id}: {text}")
+    else:
+        logging.info(f"Received text message from {contact_name} in conversation {conv_id}: {text}")
     
     # Get conversation history
     history = conversation_memory.get(conv_id, [])
     
-    # Try to answer with AI first
-    ai_response = get_ai_response(text, conv_id, crawled_data)
+    # Try to answer with AI (including image analysis if images present)
+    ai_response = get_ai_response(text, conv_id, crawled_data, images)
     
     # Check if AI couldn't find good answer by searching crawled data
-    search_results = search_in_crawled_data(text, max_results=3)
+    search_results = search_in_crawled_data(text, max_results=3) if text else []
     
     # Check if this user was previously escalated but asking a new question
     was_previously_escalated = any(
@@ -466,12 +585,18 @@ def chatwoot_webhook():
     )
     
     # Let AI evaluate its own response quality and decide if human help is needed
-    needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
+    # Skip escalation check for image messages as AI can handle them well
+    needs_human_help = False
+    if not images:  # Only check for text messages
+        needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
     
     # If user was previously escalated but AI can answer this new question, respond with AI
     if was_previously_escalated and not needs_human_help:
         # AI can handle this new question even though user was escalated before
-        response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, дэмжлэгийн багтай холбогдоно уу."
+        if images:
+            response_with_note = f"{ai_response}\n\n📸 Зургийг амжилттай шинжиллээ! Хэрэв нэмэлт асуулт байвал чөлөөтэй асуугаарай."
+        else:
+            response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, дэмжлэгийн багтай холбогдоно уу."
         send_to_chatwoot(conv_id, response_with_note)
         return jsonify({"status": "success"}), 200
     
@@ -492,15 +617,20 @@ def chatwoot_webhook():
         send_to_chatwoot(conv_id, escalation_response)
     else:
         # AI is confident in its response, send it
-        send_to_chatwoot(conv_id, ai_response)
+        if images:
+            # Add emoji to indicate image was processed
+            ai_response_with_icon = f"📸 {ai_response}"
+            send_to_chatwoot(conv_id, ai_response_with_icon)
+        else:
+            send_to_chatwoot(conv_id, ai_response)
 
     return jsonify({"status": "success"}), 200
 
 
 def should_escalate_to_human(user_message: str, search_results: list, ai_response: str, history: list) -> bool:
-    """AI evaluates its own response and decides if human help is needed using Groq"""
+    """AI evaluates its own response and decides if human help is needed using OpenAI"""
     
-    # Use Groq AI to evaluate its own response quality
+    # Use OpenAI to evaluate its own response quality
     if not client:
         # Fallback without AI evaluation - be more lenient
         return len(user_message) > 50 and (not search_results or len(search_results) == 0)
@@ -551,18 +681,18 @@ def should_escalate_to_human(user_message: str, search_results: list, ai_respons
         ]
         
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="gpt-4o",  # Use GPT-4o for better vision and text capabilities
             messages=messages,
             max_tokens=10,
             temperature=0.2
         )
         
         ai_decision = response.choices[0].message.content.strip().upper()
-        logging.info(f"Groq self-evaluation for '{user_message[:30]}...': {ai_decision}")
+        logging.info(f"OpenAI self-evaluation for '{user_message[:30]}...': {ai_decision}")
         return ai_decision == "YES"
         
     except Exception as e:
-        logging.error(f"Groq self-evaluation error: {e}")
+        logging.error(f"OpenAI self-evaluation error: {e}")
         # More lenient fallback - don't escalate by default
         return False
 
@@ -673,10 +803,46 @@ def health_check():
         "config": {
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
-            "groq_configured": client is not None,
+            "openai_configured": client is not None,
+            "model": "gpt-4o",
+            "image_recognition": True,
             "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
         }
     })
+
+@app.route("/api/analyze-image", methods=["POST"])
+def api_analyze_image():
+    """Analyze image via API"""
+    try:
+        data = request.get_json(force=True)
+        image_url = data.get("image_url")
+        question = data.get("question", "")
+        
+        if not image_url:
+            return jsonify({"error": "Missing 'image_url' in request body"}), 400
+        
+        if not client:
+            return jsonify({"error": "OpenAI API not configured"}), 500
+            
+        # Encode image to base64
+        base64_image = encode_image_to_base64(image_url)
+        if not base64_image:
+            return jsonify({"error": "Failed to process image"}), 400
+            
+        # Analyze image
+        analysis = analyze_image_with_gpt4(base64_image, question)
+        
+        return jsonify({
+            "image_url": image_url,
+            "question": question,
+            "analysis": analysis,
+            "model": "gpt-4o",
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logging.error(f"Image analysis API error: {e}")
+        return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
