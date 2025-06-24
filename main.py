@@ -229,14 +229,31 @@ def extract_images_from_chatwoot_message(message_data: dict) -> List[str]:
     """Extract image URLs from Chatwoot message attachments"""
     images = []
     
+    # Log the entire message data structure for debugging
+    logging.info(f"Full Chatwoot message data: {json.dumps(message_data, indent=2, ensure_ascii=False)}")
+    
     # Check for attachments
     attachments = message_data.get("attachments", [])
-    for attachment in attachments:
-        if attachment.get("file_type") and attachment["file_type"].startswith("image/"):
-            data_url = attachment.get("data_url")
+    logging.info(f"Found {len(attachments)} attachments in message")
+    
+    for i, attachment in enumerate(attachments):
+        logging.info(f"Attachment {i}: {json.dumps(attachment, indent=2, ensure_ascii=False)}")
+        
+        file_type = attachment.get("file_type")
+        data_url = attachment.get("data_url")
+        
+        logging.info(f"Attachment {i} - file_type: {file_type}, data_url present: {bool(data_url)}")
+        
+        if file_type and file_type.startswith("image/"):
             if data_url:
                 images.append(data_url)
+                logging.info(f"Successfully extracted image URL: {data_url[:100]}...")
+            else:
+                logging.warning(f"Image attachment {i} has no data_url")
+        else:
+            logging.info(f"Attachment {i} is not an image (file_type: {file_type})")
     
+    logging.info(f"Total images extracted: {len(images)}")
     return images
 
 # —— AI Assistant Functions —— #
@@ -244,18 +261,24 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     """Enhanced AI response with OpenAI's GPT-4 Vision for text and image support"""
     logging.info(f"Enhanced AI response called with user_message: '{user_message}', images: {images if images else 'None'}")
     
-    logging.info(f"User message: '{user_message}'")
+    # Handle None or empty user_message properly
+    user_message = user_message or ""
+    user_message = user_message.strip()
+    
+    logging.info(f"Processed user message: '{user_message}' (length: {len(user_message)})")
     
     if not client:
         return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
     
-    # Handle empty or None messages
+    # Handle empty or None messages - be more strict about empty content
     if not user_message and not images:
-        return "📝 Мессежийн агуулга алга байна. Асуултаа дахин илгээнэ үү эсвэл зураг оруулна уу."
+        logging.warning(f"Empty message received in conversation {conversation_id}")
+        return "📝 Таны мессеж хоосон байна. Асуулт эсвэл зураг илгээнэ үү."
     
     # Use default message for image-only requests
     if not user_message and images:
         user_message = "Энэ зургийг шинжилж тайлбарлаж өгнө үү?"
+        logging.info(f"Using default message for image-only request: '{user_message}'")
     
     # Handle image analysis first if images are provided
     if images:
@@ -569,19 +592,52 @@ def chatwoot_webhook():
 
     try:
         conv_id = data["conversation"]["id"]
-        # Fix: Handle None values properly
-        content = data.get("content") or ""
-        text = content.strip() if isinstance(content, str) else ""
+        # Fix: Handle None values properly with better validation
+        content = data.get("content")
+        
+        # Log raw content for debugging
+        logging.info(f"Raw webhook content: {repr(content)}")
+        
+        # Clean and validate content
+        if content is None:
+            text = ""
+            logging.warning(f"Received None content in conversation {conv_id}")
+        elif isinstance(content, str):
+            text = content.strip()
+        else:
+            text = str(content).strip()
+            logging.warning(f"Content was not string type: {type(content)}")
+        
         contact = data.get("conversation", {}).get("contact", {})
         contact_name = contact.get("name", "Хэрэглэгч")
         
         # Extract images from message attachments
         images = extract_images_from_chatwoot_message(data)
         
+        # Log additional debugging info for images
         if images:
-            logging.info(f"Received message with {len(images)} image(s) from {contact_name} in conversation {conv_id}: {text}")
+            logging.info(f"Images successfully extracted: {len(images)} images")
+            for i, img_url in enumerate(images):
+                logging.info(f"Image {i+1}: {img_url[:100]}...")
         else:
-            logging.info(f"Received text message from {contact_name} in conversation {conv_id}: {text}")
+            logging.info("No images found in message")
+            # Check if message has any attachments at all
+            all_attachments = data.get("attachments", [])
+            if all_attachments:
+                logging.info(f"Message has {len(all_attachments)} non-image attachments")
+            else:
+                logging.info("Message has no attachments")
+        
+        # Enhanced logging with content length
+        if images:
+            logging.info(f"Received message with {len(images)} image(s) from {contact_name} in conversation {conv_id}: '{text}' (length: {len(text)})")
+        else:
+            logging.info(f"Received text message from {contact_name} in conversation {conv_id}: '{text}' (length: {len(text)})")
+        
+        # Skip processing if both text and images are empty
+        if not text and not images:
+            logging.warning(f"Skipping empty message with no images in conversation {conv_id}")
+            return jsonify({"status": "skipped", "reason": "empty_message"}), 200
         
         # Get conversation history
         history = conversation_memory.get(conv_id, [])
@@ -868,6 +924,103 @@ def api_analyze_image():
     except Exception as e:
         logging.error(f"Image analysis API error: {e}")
         return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
+
+@app.route("/api/test-image", methods=["POST", "GET"])
+def test_image_recognition():
+    """Test image recognition with a sample image"""
+    if request.method == "GET":
+        # Return a simple HTML form for testing
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head><title>Зураг танилт тест</title></head>
+        <body>
+            <h2>Зураг танилт тест</h2>
+            <form method="post">
+                <label>Зургийн URL:</label><br>
+                <input type="url" name="image_url" style="width:400px" placeholder="https://cdn.zochil.shop/aae3be7a-8861-4099-abbf-8dc85efc49f3_t700.jpg" required><br><br>
+                <label>Асуулт (сонголттой):</label><br>
+                <input type="text" name="question" style="width:400px" placeholder="Энэ зургийг тайлбарлаж өгнө үү?"><br><br>
+                <button type="submit">Зураг шинжлэх</button>
+            </form>
+        </body>
+        </html>
+        """
+    
+    try:
+        # Handle both form data and JSON
+        if request.content_type and 'application/json' in request.content_type:
+            data = request.get_json(force=True)
+            image_url = data.get("image_url")
+            question = data.get("question", "")
+        else:
+            image_url = request.form.get("image_url")
+            question = request.form.get("question", "")
+        
+        if not image_url:
+            return jsonify({"error": "Зургийн URL заавал оруулах ёстой"}), 400
+        
+        if not client:
+            return jsonify({"error": "OpenAI API тохируулагдаагүй байна"}), 500
+            
+        logging.info(f"Testing image recognition with URL: {image_url}")
+        
+        # Encode image to base64
+        base64_image = encode_image_to_base64(image_url)
+        if not base64_image:
+            return jsonify({"error": "Зургийг боловсруулж чадсангүй"}), 400
+            
+        # Analyze image
+        analysis = analyze_image_with_gpt4(base64_image, question)
+        
+        result = {
+            "success": True,
+            "image_url": image_url,
+            "question": question,
+            "analysis": analysis,
+            "model": "gpt-4o",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Return HTML response for form submission
+        if request.content_type and 'application/json' not in request.content_type:
+            return f"""
+            <!DOCTYPE html>
+            <html>
+            <head><title>Зураг шинжилгээний үр дүн</title></head>
+            <body>
+                <h2>Зураг шинжилгээний үр дүн</h2>
+                <p><strong>Зураг:</strong> <a href="{image_url}" target="_blank">{image_url}</a></p>
+                <p><strong>Асуулт:</strong> {question}</p>
+                <div style="border:1px solid #ccc; padding:10px; margin:10px 0;">
+                    <strong>Хариулт:</strong><br>
+                    {analysis.replace(chr(10), '<br>')}
+                </div>
+                <a href="/api/test-image">← Буцах</a>
+            </body>
+            </html>
+            """
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logging.error(f"Image test error: {e}")
+        error_msg = f"Зураг шинжлэхэд алдаа гарлаа: {str(e)}"
+        
+        if request.content_type and 'application/json' not in request.content_type:
+            return f"""
+            <!DOCTYPE html>
+            <html>
+            <head><title>Алдаа</title></head>
+            <body>
+                <h2>Алдаа гарлаа</h2>
+                <p>{error_msg}</p>
+                <a href="/api/test-image">← Буцах</a>
+            </body>
+            </html>
+            """
+        
+        return jsonify({"error": error_msg}), 500
 
 
 if __name__ == "__main__":
