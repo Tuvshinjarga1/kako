@@ -3,19 +3,22 @@ import time
 import logging
 import requests
 import json
+import base64
+from io import BytesIO
 from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify, render_template_string, send_from_directory
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import Dict, Optional
 
-# Groq AI client импорт
+# Google Gemini AI client импорт
 try:
-    from groq import Groq
-    GROQ_AVAILABLE = True
+    from google import genai
+    from google.genai import types
+    GEMINI_AVAILABLE = True
 except ImportError:
-    GROQ_AVAILABLE = False
-    logging.warning("Groq client not installed. Install with: pip install groq")
+    GEMINI_AVAILABLE = False
+    logging.warning("Google Gemini client not installed. Install with: pip install google-genai")
 
 app = Flask(__name__, static_folder='.', static_url_path='/static')
 logging.basicConfig(level=logging.INFO)
@@ -28,11 +31,11 @@ MAX_CRAWL_PAGES      = int(os.getenv("MAX_CRAWL_PAGES", "500"))
 CHATWOOT_API_KEY     = os.getenv("CHATWOOT_API_KEY")
 ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
 CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com/")
-GROQ_API_KEY         = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
-# Initialize Groq client
-client = Groq(api_key=GROQ_API_KEY) if (GROQ_API_KEY and GROQ_AVAILABLE) else None
+# Initialize Gemini client
+client = genai.Client(api_key=GEMINI_API_KEY) if (GEMINI_API_KEY and GEMINI_AVAILABLE) else None
 
 # —— Memory Storage —— #
 conversation_memory = {}
@@ -159,22 +162,25 @@ def scrape_single(url: str):
 
 
 # —— AI Assistant Functions —— #
-def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
-    """Enhanced AI response with Groq's Llama models for better Mongolian support"""
+def get_ai_response(user_message: str, conversation_id: int, context_data: list = None, image_data: dict = None):
+    """Enhanced AI response with Google Gemini for text and image understanding"""
     
     if not client:
-        return "🔑 Groq API түлхүүр тохируулагдаагүй байна. Системийн админтай холбогдоно уу."
+        return "🔑 Google Gemini API түлхүүр тохируулагдаагүй байна. Системийн админтай холбогдоно уу."
     
-    # Handle empty message
+    # Handle empty message when no image is provided
     if not user_message or not user_message.strip():
-        return "📝 Таны мессеж хоосон байна. Асуулт эсвэл хайж байгаа зүйлээ бичээд илгээнэ үү. Би танд туслахад бэлэн байна! 😊"
+        if image_data:
+            user_message = "Энэ зураг дээр юу байгааг тайлбарлаад өгнө үү?"
+        else:
+            return "📝 Таны мессеж хоосон байна. Асуулт эсвэл хайж байгаа зүйлээ бичээд илгээнэ үү. Би танд туслахад бэлэн байна! 😊"
     
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
     
     # Build context from crawled data if available
     context = ""
-    if crawled_data:
+    if crawled_data and not image_data:  # Only search context for text queries
         # Search for relevant content with more results
         search_results = search_in_crawled_data(user_message, max_results=5)
         if search_results:
@@ -187,16 +193,18 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
                     f"{'='*50}"
                 )
             context = "\n\n".join(relevant_pages)
-            
-            # Add statistics about available data
-            # context += f"\n\n📊 Нийт {len(crawled_data)} хуудаснаас {len(search_results)} хамгийн холбогдохтой хуудас олдлоо."
-        else:
-            # context = f"📋 {len(crawled_data)} хуудаснаас хайлт хийсэн боловч тухайн сэдвээр шууд тохирох мэдээлэл олдсонгүй. Ерөнхий мэдлэгээрээ хариулж байна."
-            pass  # No context found, will use general knowledge
     
     # Build system message with context
     system_content = """Та онлайн дэлгүүрийн AI туслах бот юм. Хэрэглэгчдэд бүтээгдэхүүний мэдээлэл, үнэ, дэлгэрэнгүй мэдээлэл хайж олоход тусалдаг.
     Хэрэглэгчтэй монгол хэлээр найрсаг, тусламжтай ярилцаарай. Та өөрийн мэдэх мэдээллээр дамжуулан бүхий л асуултад хариулах чадвартай.
+    
+    ЗУРАГ ШИНЖИЛГЭЭНИЙ ТУХАЙ:
+    Хэрэв хэрэглэгч зураг илгээвэл, зургийг сайтар үзээд дараах зүйлсийг хийнэ үү:
+    • Зураг дээрх гол объект, зүйлсийг тодорхойлно
+    • Зураг дээрх бүтээгдэхүүн байвал, түүний нэр, загвар, онцлогийг хэлнэ
+    • Өнгө, хэлбэр, хэмжээ зэрэг дэлгэрэнгүй мэдээллийг өгнө
+    • Хэрэв бүтээгдэхүүн таньж болвол, түүний үнэ болон худалдан авах боломжийн талаар мэдээлэл өгнө
+    • Зургийн чанар муу эсвэл тодорхойгүй байвал, илүү тод зураг оруулахыг санал болгоно
     
     ЭНГИЙН МЭНДЧИЛГЭЭНИЙ ТУХАЙ:
     Хэрэв хэрэглэгч энгийн мэндчилгээ хийж байвал (жишээ: "сайн байна уу", "сайн уу", "мэнд", "hello", "hi", "сайн уу байна", "hey", "sn bnu", "snu" гэх мэт), дараах байдлаар хариулаарай:
@@ -207,11 +215,12 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     • 🔍 Бүтээгдэхүүн хайх болон олох
     • 💰 Үнийн мэдээлэл өгөх  
     • 📝 Бүтээгдэхүүний дэлгэрэнгүй мэдээлэл
+    • 📷 Зураг танилцуулах, зураг дээрх бүтээгдэхүүн тодорхойлох
     • 🛒 Худалдан авалтын зөвлөгөө
     • 📞 Холбоо барих мэдээлэл
     • ❓ Бүхий л төрлийн асуултад хариулах
     
-    Хайж байгаа бүтээгдэхүүнээ хэлээрэй эсвэл асуултаа чөлөөтэй асуугаарай!"
+    Хайж байгаа бүтээгдэхүүнээ хэлээрэй, зураг илгээгээрэй эсвэл асуултаа чөлөөтэй асуугаарай!"
     
     БҮТЭЭГДЭХҮҮН ХАЙХ ЗАА ЗААВАР:
     1. Хэрэглэгч бүтээгдэхүүн хайж байвал, холбогдох бүтээгдэхүүний мэдээллийг хайж олоорой
@@ -238,40 +247,55 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
     
-    # Build conversation messages for Groq
-    messages = [
-        {
-            "role": "system",
-            "content": system_content
-        }
-    ]
+    # Prepare content for Gemini
+    contents = []
     
-    # Add conversation history
-    for msg in history[-4:]:  # Last 4 messages
-        if msg.get("role") == "user":
-            messages.append({"role": "user", "content": msg["content"]})
-        elif msg.get("role") == "assistant":
-            messages.append({"role": "assistant", "content": msg["content"]})
+    # Add user message
+    if user_message:
+        contents.append(user_message)
     
-    # Add current message
-    messages.append({"role": "user", "content": user_message})
+    # Add image if provided
+    if image_data:
+        try:
+            # Get image bytes and mime type
+            image_bytes = image_data.get('data')
+            mime_type = image_data.get('mime_type', 'image/jpeg')
+            
+            if image_bytes:
+                # Create image part for Gemini
+                image_part = types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type=mime_type
+                )
+                contents.append(image_part)
+        except Exception as e:
+            logging.error(f"Image processing error: {e}")
+            return "🖼️ Зураг боловсруулахад алдаа гарлаа. Дахин оролдоно уу."
     
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # Groq's best model for Mongolian
-            messages=messages,
-            max_tokens=600,
-            temperature=0.7,
-            top_p=0.9
+        # Generate response with Gemini
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_content,
+                max_output_tokens=600,
+                temperature=0.7,
+            )
         )
         
-        ai_response = response.choices[0].message.content
+        ai_response = response.text
         
         # Store in memory
         if conversation_id not in conversation_memory:
             conversation_memory[conversation_id] = []
         
-        conversation_memory[conversation_id].append({"role": "user", "content": user_message})
+        # Store user message (include mention of image if present)
+        user_content = user_message
+        if image_data:
+            user_content += " [зураг хавсаргасан]"
+            
+        conversation_memory[conversation_id].append({"role": "user", "content": user_content})
         conversation_memory[conversation_id].append({"role": "assistant", "content": ai_response})
         
         # Keep only last 8 messages
@@ -281,8 +305,33 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         return ai_response
         
     except Exception as e:
-        logging.error(f"Groq API алдаа: {e}")
+        logging.error(f"Gemini API алдаа: {e}")
         return f"🔧 Өөрийн системээс хариулт авахад саад гарлаа. Та дараах зүйлсийг туршиж үзнэ үү:\n\n• Асуултаа арай өөрөөр томъёолж илгээнэ үү\n• Илүү тодорхой, тусгай нөхцөлөөр асуугаарай\n• Хайж байгаа зүйлийнхээ нэрийг өөрөөр бичиж үзнэ үү\n• Хэдэн секундын дараа дахин оролдоно уу\n\nБи танд туслахад бэлэн байна! 💪"
+
+def process_chatwoot_attachment(attachment_data):
+    """Process image attachment from Chatwoot"""
+    try:
+        file_type = attachment_data.get('file_type', '')
+        file_url = attachment_data.get('data_url', '')
+        
+        # Check if it's an image
+        if not file_type.startswith('image/'):
+            return None
+            
+        # Download the image
+        response = requests.get(file_url, timeout=10)
+        response.raise_for_status()
+        
+        image_bytes = response.content
+        
+        return {
+            'data': image_bytes,
+            'mime_type': file_type
+        }
+        
+    except Exception as e:
+        logging.error(f"Error processing attachment: {e}")
+        return None
 
 def search_in_crawled_data(query: str, max_results: int = 3):
     """Enhanced search through crawled data with multiple strategies"""
@@ -482,7 +531,7 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with AI integration using RAG system"""
+    """Enhanced webhook with AI integration using RAG system and image recognition"""
     global crawled_data, crawl_status
     
     data = request.json or {}
@@ -496,15 +545,22 @@ def chatwoot_webhook():
     contact = data.get("conversation", {}).get("contact", {})
     contact_name = contact.get("name", "Хэрэглэгч")
     
-    logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
+    # Check for image attachments
+    attachments = data.get("attachments", [])
+    image_data = None
     
-    # Skip empty messages
-    if not text:
-        logging.warning(f"Skipping empty message in conversation {conv_id}")
-        return jsonify({"status": "skipped", "reason": "empty_message"}), 200
+    if attachments:
+        for attachment in attachments:
+            # Process the first image attachment
+            image_data = process_chatwoot_attachment(attachment)
+            if image_data:
+                logging.info(f"Image attachment received from {contact_name} in conversation {conv_id}")
+                break
     
-    # Always use AI with RAG system - no human escalation
-    ai_response = get_ai_response(text, conv_id, crawled_data)
+    logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text} {'[with image]' if image_data else ''}")
+    
+    # Use AI with image support
+    ai_response = get_ai_response(text, conv_id, crawled_data, image_data)
     
     # Send AI response directly
     send_to_chatwoot(conv_id, ai_response)
@@ -587,14 +643,14 @@ def api_search():
 def get_conversation_memory(conv_id):
     """Get conversation memory for debugging"""
     memory = conversation_memory.get(conv_id, [])
-    return jsonify({"conversation_id": conv_id, "memory": memory, "system": "pure_rag_no_escalation"})
+    return jsonify({"conversation_id": conv_id, "memory": memory, "system": "gemini_multimodal_rag"})
 
 @app.route("/api/conversation/<int:conv_id>/clear", methods=["POST"])
 def clear_conversation_memory(conv_id):
     """Clear conversation memory"""
     if conv_id in conversation_memory:
         del conversation_memory[conv_id]
-    return jsonify({"status": "cleared", "conversation_id": conv_id, "system": "pure_rag_no_escalation"})
+    return jsonify({"status": "cleared", "conversation_id": conv_id, "system": "gemini_multimodal_rag"})
 
 @app.route("/api/crawled-data", methods=["GET"])
 def get_crawled_data():
@@ -611,7 +667,7 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "system_type": "pure_rag_no_escalation",
+        "system_type": "gemini_multimodal_rag",
         "timestamp": datetime.now().isoformat(),
         "crawl_status": crawl_status,
         "crawled_pages": len(crawled_data),
@@ -619,9 +675,9 @@ def health_check():
         "config": {
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
-            "groq_configured": client is not None,
+            "gemini_configured": client is not None,
             "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
-            "human_escalation": False
+            "image_recognition": True
         }
     })
 
