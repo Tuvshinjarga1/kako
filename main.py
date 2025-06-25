@@ -163,7 +163,11 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     """Enhanced AI response with Groq's Llama models for better Mongolian support"""
     
     if not client:
-        return "🔑 Groq API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
+        return "🔑 Groq API түлхүүр тохируулагдаагүй байна. Системийн админтай холбогдоно уу."
+    
+    # Handle empty message
+    if not user_message or not user_message.strip():
+        return "📝 Таны мессеж хоосон байна. Асуулт эсвэл хайж байгаа зүйлээ бичээд илгээнэ үү. Би танд туслахад бэлэн байна! 😊"
     
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
@@ -171,21 +175,27 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     # Build context from crawled data if available
     context = ""
     if crawled_data:
-        # Search for relevant content
-        search_results = search_in_crawled_data(user_message, max_results=3)
+        # Search for relevant content with more results
+        search_results = search_in_crawled_data(user_message, max_results=5)
         if search_results:
             relevant_pages = []
-            for result in search_results:
+            for i, result in enumerate(search_results, 1):
                 relevant_pages.append(
-                    f"Хуудас: {result['title']}\n"
+                    f"Хуудас {i}: {result['title']}\n"
                     f"URL: {result['url']}\n"
                     f"Холбогдох агуулга: {result['snippet']}\n"
+                    f"{'='*50}"
                 )
             context = "\n\n".join(relevant_pages)
+            
+            # Add statistics about available data
+            # context += f"\n\n📊 Нийт {len(crawled_data)} хуудаснаас {len(search_results)} хамгийн холбогдохтой хуудас олдлоо."
+        else:
+            # context = f"📋 {len(crawled_data)} хуудаснаас хайлт хийсэн боловч тухайн сэдвээр шууд тохирох мэдээлэл олдсонгүй. Ерөнхий мэдлэгээрээ хариулж байна."
     
     # Build system message with context
     system_content = """Та онлайн дэлгүүрийн AI туслах бот юм. Хэрэглэгчдэд бүтээгдэхүүний мэдээлэл, үнэ, дэлгэрэнгүй мэдээлэл хайж олоход тусалдаг.
-    Хэрэглэгчтэй монгол хэлээр найрсаг, тусламжтай ярилцаарай.
+    Хэрэглэгчтэй монгол хэлээр найрсаг, тусламжтай ярилцаарай. Та өөрийн мэдэх мэдээллээр дамжуулан бүхий л асуултад хариулах чадвартай.
     
     ЭНГИЙН МЭНДЧИЛГЭЭНИЙ ТУХАЙ:
     Хэрэв хэрэглэгч энгийн мэндчилгээ хийж байвал (жишээ: "сайн байна уу", "сайн уу", "мэнд", "hello", "hi", "сайн уу байна", "hey", "sn bnu", "snu" гэх мэт), дараах байдлаар хариулаарай:
@@ -198,6 +208,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     • 📝 Бүтээгдэхүүний дэлгэрэнгүй мэдээлэл
     • 🛒 Худалдан авалтын зөвлөгөө
     • 📞 Холбоо барих мэдээлэл
+    • ❓ Бүхий л төрлийн асуултад хариулах
     
     Хайж байгаа бүтээгдэхүүнээ хэлээрэй эсвэл асуултаа чөлөөтэй асуугаарай!"
     
@@ -219,7 +230,9 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     - Хэрэв тухайн бүтээгдэхүүн олдохгүй бол, ижил төстэй бүтээгдэхүүн санал болгооройй
     - Үнийн асуултад тодорхой хариулт өгөөрөй
     - Хэрэглэгчийн сонирхлын дагуу нэмэлт санал болгооройй
-    - Худалдан авах процессын талаар тайлбарлаж өгөөрөй"""
+    - Худалдан авах процессын талаар тайлбарлаж өгөөрөй
+    
+    ЧУХАЛ: Та бүх төрлийн асуултад хариулах чадвартай. Хэрэв баримт бичгээс тодорхой мэдээлэл олдохгүй байвал, ерөнхий мэдлэг, туршлагаараа тусалж, хэрэглэгчид хамгийн сайн зөвлөгөө өгөөрөй. Дандаа найрсаг, тусламжтай байж, хэрэглэгчийн асуултыг бүрэн хариулахыг хичээрэй."""
     
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
@@ -268,50 +281,84 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         
     except Exception as e:
         logging.error(f"Groq API алдаа: {e}")
-        return f"🔧 AI-тай холбогдоход саад гарлаа. Дараах зүйлсийг туршиж үзнэ үү:\n• Асуултаа дахин илгээнэ үү\n• Асуултаа тодорхой болгоно уу\n• Холбогдох мэдээллийг хайж үзнэ үү\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
+        return f"🔧 Өөрийн системээс хариулт авахад саад гарлаа. Та дараах зүйлсийг туршиж үзнэ үү:\n\n• Асуултаа арай өөрөөр томъёолж илгээнэ үү\n• Илүү тодорхой, тусгай нөхцөлөөр асуугаарай\n• Хайж байгаа зүйлийнхээ нэрийг өөрөөр бичиж үзнэ үү\n• Хэдэн секундын дараа дахин оролдоно уу\n\nБи танд туслахад бэлэн байна! 💪"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
-    """Simple search through crawled data"""
+    """Enhanced search through crawled data with multiple strategies"""
     if not crawled_data:
         return []
     
     query_lower = query.lower()
     results = []
+    scored_results = []
     
     for page in crawled_data:
         title = page['title'].lower()
         body = page['body'].lower()
         
-        # Check if query matches in title or body
-        if (query_lower in title or 
-            query_lower in body or 
-            any(word in title or word in body for word in query_lower.split())):
-            
-            # Find the most relevant snippet
-            query_words = query_lower.split()
+        # Calculate relevance score
+        score = 0
+        
+        # Exact phrase match in title (highest score)
+        if query_lower in title:
+            score += 10
+        
+        # Exact phrase match in body
+        if query_lower in body:
+            score += 5
+        
+        # Individual word matches
+        query_words = query_lower.split()
+        for word in query_words:
+            if len(word) > 2:  # Skip very short words
+                if word in title:
+                    score += 3
+                if word in body:
+                    score += 1
+        
+        # Partial matches (for Mongolian words)
+        for word in query_words:
+            if len(word) > 3:
+                for title_word in title.split():
+                    if word in title_word or title_word in word:
+                        score += 2
+                for body_word in body.split():
+                    if word in body_word or body_word in word:
+                        score += 0.5
+        
+        # Only include pages with some relevance
+        if score > 0:
+            # Find the best snippet
             best_snippet = ""
-            max_context = 300
+            max_context = 400
             
+            # Look for best matching context around query words
             for word in query_words:
                 if word in body.lower():
-                    start = max(0, body.lower().find(word) - 100)
-                    end = min(len(body), body.lower().find(word) + 200)
-                    snippet = body[start:end]
+                    word_pos = body.lower().find(word)
+                    start = max(0, word_pos - 150)
+                    end = min(len(body), word_pos + 250)
+                    snippet = body[start:end].strip()
                     if len(snippet) > len(best_snippet):
                         best_snippet = snippet
             
             if not best_snippet:
                 best_snippet = body[:max_context] + "..." if len(body) > max_context else body
                 
-            results.append({
+            scored_results.append({
                 'title': page['title'],
                 'url': page['url'],
-                'snippet': best_snippet
+                'snippet': best_snippet,
+                'score': score
             })
-            
-            # Stop when we have enough results
-            if len(results) >= max_results:
-                break
+    
+    # Sort by score (highest first) and return top results
+    scored_results.sort(key=lambda x: x['score'], reverse=True)
+    
+    # Remove score from final results
+    for result in scored_results[:max_results]:
+        del result['score']
+        results.append(result)
             
     return results
 
@@ -434,7 +481,7 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with AI integration"""
+    """Enhanced webhook with AI integration using RAG system"""
     global crawled_data, crawl_status
     
     data = request.json or {}
@@ -450,121 +497,18 @@ def chatwoot_webhook():
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
     
-    # Get conversation history
-    history = conversation_memory.get(conv_id, [])
+    # Skip empty messages
+    if not text:
+        logging.warning(f"Skipping empty message in conversation {conv_id}")
+        return jsonify({"status": "skipped", "reason": "empty_message"}), 200
     
-    # Try to answer with AI first
+    # Always use AI with RAG system - no human escalation
     ai_response = get_ai_response(text, conv_id, crawled_data)
     
-    # Check if AI couldn't find good answer by searching crawled data
-    search_results = search_in_crawled_data(text, max_results=3)
-    
-    # Check if this user was previously escalated but asking a new question
-    was_previously_escalated = any(
-        msg.get("role") == "system" and "escalated_to_human" in msg.get("content", "")
-        for msg in history
-    )
-    
-    # Let AI evaluate its own response quality and decide if human help is needed
-    needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
-    
-    # If user was previously escalated but AI can answer this new question, respond with AI
-    if was_previously_escalated and not needs_human_help:
-        # AI can handle this new question even though user was escalated before
-        response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, дэмжлэгийн багтай холбогдоно уу."
-        send_to_chatwoot(conv_id, response_with_note)
-        return jsonify({"status": "success"}), 200
-    
-    if needs_human_help:
-        # Mark this conversation as escalated
-        if conv_id not in conversation_memory:
-            conversation_memory[conv_id] = []
-        conversation_memory[conv_id].append({
-            "role": "system", 
-            "content": "escalated_to_human"
-        })
-        
-        # AI thinks it can't handle this properly, escalate to human
-        escalation_response = """🤝 Би таны асуултад хангалттай хариулт өгч чадахгүй байна. Удахгүй таны асуултад ажилтан хариулт өгөх болно.
-
-Тусламжийн баг удахгүй танд хариулт өгөх болно."""
-        
-        send_to_chatwoot(conv_id, escalation_response)
-    else:
-        # AI is confident in its response, send it
-        send_to_chatwoot(conv_id, ai_response)
+    # Send AI response directly
+    send_to_chatwoot(conv_id, ai_response)
 
     return jsonify({"status": "success"}), 200
-
-
-def should_escalate_to_human(user_message: str, search_results: list, ai_response: str, history: list) -> bool:
-    """AI evaluates its own response and decides if human help is needed using Groq"""
-    
-    # Use Groq AI to evaluate its own response quality
-    if not client:
-        # Fallback without AI evaluation - be more lenient
-        return len(user_message) > 50 and (not search_results or len(search_results) == 0)
-    
-    # Build context for AI self-evaluation
-    context = f"""Хэрэглэгчийн асуулт: "{user_message}"
-
-Манай баримт бичгээс хайсан үр дүн:
-{f"Олдсон: {len(search_results)} үр дүн" if search_results else "Мэдээлэл олдсонгүй"}
-
-Миний өгсөн хариулт: "{ai_response}"
-
-Ярилцлагын сүүлийн мессежүүд:"""
-    
-    if history:
-        recent_messages = [msg.get("content", "")[:100] for msg in history[-3:] if msg.get("role") == "user"]
-        if recent_messages:
-            context += "\n" + "\n".join(recent_messages)
-    
-    try:
-        messages = [
-            {
-                "role": "system",
-                "content": """Та өөрийн өгсөн хариултыг үнэлж, хэрэглэгчид хангалттай эсэхийг шийднэ.
-
-Дараах тохиолдлуудад л хүний ажилтны тусламж шаардлагатай:
-- Хэрэглэгч техникийн алдаа, тохиргооны асуудлаар тусламж хүсэж байгаа
-- Акаунт, төлбөр, хостинг, домэйн зэрэг онлайн дэлгүүрийн үйлчилгээтэй холбоотой асуудал
-- Тусгай хүсэлт, гомдол, шуурхай тусламж хэрэгтэй асуудал
-- Хэрэглэгч өөрөө "ажилтныг хүсэж байна" гэж тодорхой хэлсэн тохиолдол
-- Миний хариулт нь хэрэглэгчийн асуултын үндсэн сэдвээс огт холдсон бол
-
-Дараах тохиолдлуудад хүний тусламж ШААРДЛАГАГҮЙ:
-- Энгийн мэдээлэл асуух (бүтээгдэхүүний тухай)
-- Ерөнхий зөвлөгөө авах
-- Худалдан авах мэдлэг судлах
-- Би хангалттай хариулт өгч чадсан тохиолдол
-- Хэрэглэгч зүгээр л мэдээлэл хайж байгаа
-
-Өөрийнхөө хариултанд итгэлтэй байж, хэрэглэгч дахин асууж болно гэдгийг санаарай.
-
-Хариултаа зөвхөн 'YES' (хүний тусламж хэрэгтэй) эсвэл 'NO' (миний хариулт хангалттай) гэж өгнө үү."""
-            },
-            {
-                "role": "user", 
-                "content": context
-            }
-        ]
-        
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            max_tokens=10,
-            temperature=0.2
-        )
-        
-        ai_decision = response.choices[0].message.content.strip().upper()
-        logging.info(f"Groq self-evaluation for '{user_message[:30]}...': {ai_decision}")
-        return ai_decision == "YES"
-        
-    except Exception as e:
-        logging.error(f"Groq self-evaluation error: {e}")
-        # More lenient fallback - don't escalate by default
-        return False
 
 
 # —— Additional API Endpoints —— #
@@ -642,14 +586,14 @@ def api_search():
 def get_conversation_memory(conv_id):
     """Get conversation memory for debugging"""
     memory = conversation_memory.get(conv_id, [])
-    return jsonify({"conversation_id": conv_id, "memory": memory})
+    return jsonify({"conversation_id": conv_id, "memory": memory, "system": "pure_rag_no_escalation"})
 
 @app.route("/api/conversation/<int:conv_id>/clear", methods=["POST"])
 def clear_conversation_memory(conv_id):
     """Clear conversation memory"""
     if conv_id in conversation_memory:
         del conversation_memory[conv_id]
-    return jsonify({"status": "cleared", "conversation_id": conv_id})
+    return jsonify({"status": "cleared", "conversation_id": conv_id, "system": "pure_rag_no_escalation"})
 
 @app.route("/api/crawled-data", methods=["GET"])
 def get_crawled_data():
@@ -666,6 +610,7 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
+        "system_type": "pure_rag_no_escalation",
         "timestamp": datetime.now().isoformat(),
         "crawl_status": crawl_status,
         "crawled_pages": len(crawled_data),
@@ -674,7 +619,8 @@ def health_check():
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "groq_configured": client is not None,
-            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
+            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
+            "human_escalation": False
         }
     })
 
