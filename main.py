@@ -130,6 +130,80 @@ if AUTO_CRAWL_ON_START:
     threading.Thread(target=auto_crawl_on_startup, daemon=True).start()
 
 # —— Image Processing Functions —— #
+def is_product_image(img_url: str, alt_text: str, page_context: str = "") -> bool:
+    """Determine if an image is likely a product image"""
+    img_url_lower = img_url.lower()
+    alt_lower = alt_text.lower()
+    page_lower = page_context.lower()
+    
+    # Skip common non-product images
+    skip_patterns = [
+        'logo', 'banner', 'header', 'footer', 'menu', 'icon', 'button',
+        'social', 'facebook', 'instagram', 'twitter', 'youtube',
+        'avatar', 'profile', 'user', 'author', 'team',
+        'background', 'bg-', 'hero', 'slider', 'carousel',
+        'arrow', 'chevron', 'close', 'search', 'cart-icon',
+        'payment', 'visa', 'mastercard', 'paypal',
+        'placeholder', 'loading', 'spinner', 'no-image',
+        'about-us', 'contact', 'location', 'map'
+    ]
+    
+    # Check if URL or alt contains skip patterns
+    for pattern in skip_patterns:
+        if pattern in img_url_lower or pattern in alt_lower:
+            return False
+    
+    # Product image indicators
+    product_indicators = [
+        # URL patterns
+        'product', 'item', 'goods', 'merchandise', 'catalog',
+        'shop', 'store', 'buy', 'sale', 'price',
+        'thumbnail', 'thumb', 'gallery', 'image',
+        
+        # Mongolian product terms
+        'бүтээгдэхүүн', 'барааг', 'зураг', 'зүйл',
+        'хувцас', 'гутал', 'цүнх', 'эмэгтэй', 'эрэгтэй',
+        'зуны', 'өвлийн', 'хаврын', 'намрын',
+        
+        # Common product categories
+        'clothing', 'shoes', 'bag', 'watch', 'jewelry',
+        'electronics', 'phone', 'laptop', 'headphone',
+        'book', 'toy', 'game', 'sport', 'fitness',
+        'beauty', 'cosmetic', 'perfume', 'makeup',
+        'home', 'kitchen', 'furniture', 'decor'
+    ]
+    
+    # Check for product indicators
+    product_score = 0
+    for indicator in product_indicators:
+        if indicator in img_url_lower:
+            product_score += 2
+        if indicator in alt_lower:
+            product_score += 3
+        if indicator in page_lower:
+            product_score += 1
+    
+    # Additional checks
+    # Images in specific folders are likely products
+    if any(folder in img_url_lower for folder in ['/products/', '/items/', '/catalog/', '/shop/', '/store/']):
+        product_score += 5
+    
+    # Images with product-like alt text
+    if any(term in alt_lower for term in ['төгрөг', '₮', 'price', 'sale', 'buy', 'order']):
+        product_score += 3
+    
+    # Images with dimensions in filename (often product images)
+    import re
+    if re.search(r'\d+x\d+', img_url_lower):
+        product_score += 2
+    
+    # File format preferences (product images often in these formats)
+    if any(ext in img_url_lower for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+        product_score += 1
+    
+    # Return True if score is high enough
+    return product_score >= 3
+
 def download_and_save_image(img_url: str, base_url: str) -> Optional[Dict]:
     """Download image and save it locally with metadata"""
     try:
@@ -319,8 +393,9 @@ def extract_content(soup: BeautifulSoup, base_url: str):
         if text:
             texts.append(text)
 
-    # Get page title for context
+    # Get page title and text content for context
     page_title = soup.title.string.strip() if soup.title and soup.title.string else base_url
+    page_text = " ".join(texts[:5])  # Use first 5 text elements for context
 
     for img in main.find_all("img"):
         src = img.get("src")
@@ -331,20 +406,23 @@ def extract_content(soup: BeautifulSoup, base_url: str):
             texts.append(entry)
             images.append({"url": full_img_url, "alt": alt})
 
-            # Download and process image for similarity matching
-            logging.info(f"Downloading image: {full_img_url}")
-            image_data = download_and_save_image(src, base_url)
-            if image_data:
-                # Add page context to image data
-                image_data['page_url'] = base_url
-                image_data['page_title'] = page_title
-                image_data['alt'] = alt
-                
-                # Add to global crawled images list
-                crawled_images.append(image_data)
-                logging.info(f"Successfully processed image: {image_data['filename']}")
+            # Only download and process product images
+            if is_product_image(full_img_url, alt, page_text):
+                logging.info(f"Downloading product image: {full_img_url}")
+                image_data = download_and_save_image(src, base_url)
+                if image_data:
+                    # Add page context to image data
+                    image_data['page_url'] = base_url
+                    image_data['page_title'] = page_title
+                    image_data['alt'] = alt
+                    
+                    # Add to global crawled images list
+                    crawled_images.append(image_data)
+                    logging.info(f"Successfully processed product image: {image_data['filename']}")
+                else:
+                    logging.warning(f"Failed to process product image: {full_img_url}")
             else:
-                logging.warning(f"Failed to process image: {full_img_url}")
+                logging.info(f"Skipping non-product image: {full_img_url}")
 
     return "\n\n".join(texts), images
 
