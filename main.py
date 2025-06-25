@@ -4,12 +4,15 @@ import logging
 import requests
 import json
 import base64
+import hashlib
+import numpy as np
 from io import BytesIO
 from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify, render_template_string, send_from_directory
 from bs4 import BeautifulSoup
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+from PIL import Image, ImageOps
 
 # Google Gemini AI client импорт
 try:
@@ -34,6 +37,10 @@ CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com/
 GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
+# Image storage config
+IMAGES_DIR = "crawled_images"
+os.makedirs(IMAGES_DIR, exist_ok=True)
+
 # Initialize Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if (GEMINI_API_KEY and GEMINI_AVAILABLE) else None
 
@@ -41,6 +48,7 @@ client = genai.Client(api_key=GEMINI_API_KEY) if (GEMINI_API_KEY and GEMINI_AVAI
 conversation_memory = {}
 crawled_data = []
 crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
+crawled_images = []  # Store image metadata and features
 
 # —— Crawl & Scrape —— #
 def crawl_and_scrape(start_url: str):
@@ -121,6 +129,185 @@ import threading
 if AUTO_CRAWL_ON_START:
     threading.Thread(target=auto_crawl_on_startup, daemon=True).start()
 
+# —— Image Processing Functions —— #
+def download_and_save_image(img_url: str, base_url: str) -> Optional[Dict]:
+    """Download image and save it locally with metadata"""
+    try:
+        # Create full URL
+        full_url = urljoin(base_url, img_url)
+        
+        # Create hash for filename
+        url_hash = hashlib.md5(full_url.encode()).hexdigest()
+        
+        # Download image
+        response = requests.get(full_url, timeout=10, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        response.raise_for_status()
+        
+        # Check if it's actually an image
+        content_type = response.headers.get('content-type', '')
+        if not content_type.startswith('image/'):
+            return None
+            
+        # Save original image
+        file_extension = '.jpg'  # Default
+        if 'png' in content_type:
+            file_extension = '.png'
+        elif 'webp' in content_type:
+            file_extension = '.webp'
+        elif 'gif' in content_type:
+            file_extension = '.gif'
+            
+        filename = f"{url_hash}{file_extension}"
+        filepath = os.path.join(IMAGES_DIR, filename)
+        
+        with open(filepath, 'wb') as f:
+            f.write(response.content)
+            
+        # Load and process image
+        try:
+            with Image.open(filepath) as img:
+                # Convert to RGB if needed
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Get basic features
+                width, height = img.size
+                
+                # Create thumbnail for faster processing
+                thumb_size = (128, 128)
+                thumb = img.copy()
+                thumb.thumbnail(thumb_size, Image.Resampling.LANCZOS)
+                
+                # Calculate basic color histogram (simple feature)
+                hist_r = thumb.histogram()[0:256]    # Red channel
+                hist_g = thumb.histogram()[256:512]  # Green channel
+                hist_b = thumb.histogram()[512:768]  # Blue channel
+                
+                # Normalize histograms
+                total_pixels = thumb.size[0] * thumb.size[1]
+                hist_r = [x/total_pixels for x in hist_r]
+                hist_g = [x/total_pixels for x in hist_g]
+                hist_b = [x/total_pixels for x in hist_b]
+                
+                return {
+                    'url': full_url,
+                    'filename': filename,
+                    'filepath': filepath,
+                    'width': width,
+                    'height': height,
+                    'file_size': len(response.content),
+                    'content_type': content_type,
+                    'hist_r': hist_r,
+                    'hist_g': hist_g,
+                    'hist_b': hist_b,
+                    'thumb_size': thumb_size
+                }
+                
+        except Exception as img_error:
+            logging.warning(f"Could not process image {full_url}: {img_error}")
+            # Clean up the file if processing failed
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            return None
+            
+    except Exception as e:
+        logging.warning(f"Could not download image {img_url}: {e}")
+        return None
+
+def calculate_image_similarity(img1_features: Dict, img2_features: Dict) -> float:
+    """Calculate similarity between two images using histogram comparison"""
+    try:
+        # Compare histograms using Chi-squared distance
+        def chi_squared_distance(h1, h2):
+            distance = 0
+            for i in range(len(h1)):
+                if h1[i] + h2[i] > 0:
+                    distance += ((h1[i] - h2[i]) ** 2) / (h1[i] + h2[i])
+            return distance
+        
+        # Calculate distances for each color channel
+        dist_r = chi_squared_distance(img1_features['hist_r'], img2_features['hist_r'])
+        dist_g = chi_squared_distance(img1_features['hist_g'], img2_features['hist_g'])
+        dist_b = chi_squared_distance(img1_features['hist_b'], img2_features['hist_b'])
+        
+        # Average distance
+        avg_distance = (dist_r + dist_g + dist_b) / 3
+        
+        # Convert to similarity (0-1, where 1 is identical)
+        similarity = 1 / (1 + avg_distance)
+        
+        return similarity
+        
+    except Exception as e:
+        logging.error(f"Error calculating image similarity: {e}")
+        return 0.0
+
+def process_user_image_features(image_bytes: bytes) -> Optional[Dict]:
+    """Process user uploaded image and extract features"""
+    try:
+        # Load image from bytes
+        img = Image.open(BytesIO(image_bytes))
+        
+        # Convert to RGB if needed
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Get basic info
+        width, height = img.size
+        
+        # Create thumbnail for processing
+        thumb_size = (128, 128)
+        thumb = img.copy()
+        thumb.thumbnail(thumb_size, Image.Resampling.LANCZOS)
+        
+        # Calculate color histograms
+        hist_r = thumb.histogram()[0:256]
+        hist_g = thumb.histogram()[256:512]
+        hist_b = thumb.histogram()[512:768]
+        
+        # Normalize
+        total_pixels = thumb.size[0] * thumb.size[1]
+        hist_r = [x/total_pixels for x in hist_r]
+        hist_g = [x/total_pixels for x in hist_g]
+        hist_b = [x/total_pixels for x in hist_b]
+        
+        return {
+            'width': width,
+            'height': height,
+            'hist_r': hist_r,
+            'hist_g': hist_g,
+            'hist_b': hist_b,
+            'thumb_size': thumb_size
+        }
+        
+    except Exception as e:
+        logging.error(f"Error processing user image: {e}")
+        return None
+
+def find_similar_crawled_images(user_image_features: Dict, similarity_threshold: float = 0.3) -> List[Dict]:
+    """Find similar images from crawled data"""
+    similar_images = []
+    
+    for img_data in crawled_images:
+        similarity = calculate_image_similarity(user_image_features, img_data)
+        
+        if similarity >= similarity_threshold:
+            similar_images.append({
+                'url': img_data['url'],
+                'similarity': similarity,
+                'filename': img_data['filename'],
+                'page_url': img_data.get('page_url', ''),
+                'alt': img_data.get('alt', ''),
+                'page_title': img_data.get('page_title', '')
+            })
+    
+    # Sort by similarity (highest first) and return top 3 matches
+    similar_images.sort(key=lambda x: x['similarity'], reverse=True)
+    
+    return similar_images[:3]  # Return top 3 matches
+
 # —— Content Extraction —— #
 def extract_content(soup: BeautifulSoup, base_url: str):
     main = soup.find("main") or soup
@@ -132,6 +319,9 @@ def extract_content(soup: BeautifulSoup, base_url: str):
         if text:
             texts.append(text)
 
+    # Get page title for context
+    page_title = soup.title.string.strip() if soup.title and soup.title.string else base_url
+
     for img in main.find_all("img"):
         src = img.get("src")
         alt = img.get("alt", "").strip()
@@ -140,6 +330,21 @@ def extract_content(soup: BeautifulSoup, base_url: str):
             entry = f"[Image] {alt} — {full_img_url}" if alt else f"[Image] {full_img_url}"
             texts.append(entry)
             images.append({"url": full_img_url, "alt": alt})
+
+            # Download and process image for similarity matching
+            logging.info(f"Downloading image: {full_img_url}")
+            image_data = download_and_save_image(src, base_url)
+            if image_data:
+                # Add page context to image data
+                image_data['page_url'] = base_url
+                image_data['page_title'] = page_title
+                image_data['alt'] = alt
+                
+                # Add to global crawled images list
+                crawled_images.append(image_data)
+                logging.info(f"Successfully processed image: {image_data['filename']}")
+            else:
+                logging.warning(f"Failed to process image: {full_img_url}")
 
     return "\n\n".join(texts), images
 
@@ -180,6 +385,28 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     
     # Build context from crawled data if available
     context = ""
+    similar_images_context = ""
+    
+    # Process image similarity if user sent an image
+    if image_data and crawled_images:
+        user_image_features = process_user_image_features(image_data.get('data'))
+        if user_image_features:
+            similar_images = find_similar_crawled_images(user_image_features, similarity_threshold=0.2)
+            if similar_images:
+                similar_images_info = []
+                for i, sim_img in enumerate(similar_images, 1):
+                    similarity_percent = round(sim_img['similarity'] * 100, 1)
+                    similar_images_info.append(
+                        f"Ижил төстэй зураг {i} ({similarity_percent}% ижил):\n"
+                        f"• Хуудас: {sim_img['page_title']}\n"
+                        f"• URL: {sim_img['page_url']}\n"
+                        f"• Зургийн тайлбар: {sim_img['alt']}\n"
+                        f"• Зургийн холбоос: {sim_img['url']}\n"
+                        f"{'='*50}"
+                    )
+                similar_images_context = "\n\n".join(similar_images_info)
+                logging.info(f"Found {len(similar_images)} similar images for user image")
+    
     if crawled_data and not image_data:  # Only search context for text queries
         # Search for relevant content with more results
         search_results = search_in_crawled_data(user_message, max_results=5)
@@ -206,6 +433,13 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     • Хэрэв бүтээгдэхүүн таньж болвол, түүний үнэ болон худалдан авах боломжийн талаар мэдээлэл өгнө
     • Зургийн чанар муу эсвэл тодорхойгүй байвал, илүү тод зураг оруулахыг санал болгоно
     
+    ИЖИЛ ТӨСТЭЙ ЗУРГИЙН МЭДЭЭЛЭЛ:
+    Хэрэв хэрэглэгчийн илгээсэн зурагтай ижил төстэй зургууд олдсон бол:
+    • Эдгээр хамгийн ижил төстэй 3 зургийн мэдээллийг ашиглан илүү нарийвчлалтай хариулт өгнө үү
+    • Тухайн бүтээгдэхүүний хуудасны мэдээллийг дурдаж, холбоосыг өгнө үү
+    • Ижил төстэй зургуудын ялгааг тайлбарлаж өгнө үү
+    • Хамгийн тохирох бүтээгдэхүүнийг санал болгоно уу
+    
     ЭНГИЙН МЭНДЧИЛГЭЭНИЙ ТУХАЙ:
     Хэрэв хэрэглэгч энгийн мэндчилгээ хийж байвал (жишээ: "сайн байна уу", "сайн уу", "мэнд", "hello", "hi", "сайн уу байна", "hey", "sn bnu", "snu" гэх мэт), дараах байдлаар хариулаарай:
     
@@ -216,6 +450,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     • 💰 Үнийн мэдээлэл өгөх  
     • 📝 Бүтээгдэхүүний дэлгэрэнгүй мэдээлэл
     • 📷 Зураг танилцуулах, зураг дээрх бүтээгдэхүүн тодорхойлох
+    • 🔄 Ижил төстэй бүтээгдэхүүн олох (зураг илгээвэл)
     • 🛒 Худалдан авалтын зөвлөгөө
     • 📞 Холбоо барих мэдээлэл
     • ❓ Бүхий л төрлийн асуултад хариулах
@@ -246,6 +481,9 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
+        
+    if similar_images_context:
+        system_content += f"\n\nИжил төстэй зургийн мэдээлэл (хэрэглэгчийн илгээсэн зурагтай харьцуулах):\n{similar_images_context}"
     
     # Prepare content for Gemini
     contents = []
@@ -667,20 +905,111 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "system_type": "gemini_multimodal_rag",
+        "system_type": "gemini_multimodal_rag_with_image_similarity",
         "timestamp": datetime.now().isoformat(),
         "crawl_status": crawl_status,
         "crawled_pages": len(crawled_data),
+        "crawled_images": len(crawled_images),
         "active_conversations": len(conversation_memory),
         "config": {
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "gemini_configured": client is not None,
             "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
-            "image_recognition": True
+            "image_recognition": True,
+            "image_similarity_matching": True,
+            "images_directory": IMAGES_DIR
         }
     })
 
+@app.route("/api/crawled-images", methods=["GET"])
+def get_crawled_images():
+    """Get information about crawled images"""
+    page_limit = request.args.get('limit', 20, type=int)
+    return jsonify({
+        "total_images": len(crawled_images),
+        "crawl_status": crawl_status,
+        "images": [
+            {
+                "url": img["url"],
+                "filename": img["filename"],
+                "page_url": img.get("page_url", ""),
+                "page_title": img.get("page_title", ""),
+                "alt": img.get("alt", ""),
+                "width": img.get("width", 0),
+                "height": img.get("height", 0),
+                "file_size": img.get("file_size", 0),
+                "content_type": img.get("content_type", "")
+            } for img in crawled_images[:page_limit]
+        ]
+    })
+
+@app.route("/api/similar-images", methods=["POST"])
+def find_similar_images_api():
+    """Find similar images to uploaded image via API"""
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
+    
+    file = request.files['image']
+    if file.filename == '':
+        return jsonify({"error": "No image file selected"}), 400
+    
+    try:
+        # Read image data
+        image_bytes = file.read()
+        
+        # Process image features
+        user_image_features = process_user_image_features(image_bytes)
+        if not user_image_features:
+            return jsonify({"error": "Could not process uploaded image"}), 400
+        
+        # Find similar images
+        similarity_threshold = request.form.get('threshold', 0.3, type=float)
+        similar_images = find_similar_crawled_images(user_image_features, similarity_threshold)
+        
+        return jsonify({
+            "similar_images_count": len(similar_images),
+            "threshold_used": similarity_threshold,
+            "similar_images": similar_images
+        })
+        
+    except Exception as e:
+        logging.error(f"Error in similar images API: {e}")
+        return jsonify({"error": f"Processing failed: {str(e)}"}), 500
+
+@app.route("/api/clear-images", methods=["POST"])
+def clear_crawled_images():
+    """Clear all crawled images"""
+    global crawled_images
+    
+    try:
+        # Remove image files
+        if os.path.exists(IMAGES_DIR):
+            import shutil
+            shutil.rmtree(IMAGES_DIR)
+            os.makedirs(IMAGES_DIR, exist_ok=True)
+        
+        # Clear memory
+        crawled_images = []
+        
+        return jsonify({
+            "status": "success",
+            "message": "All crawled images cleared",
+            "images_remaining": len(crawled_images)
+        })
+        
+    except Exception as e:
+        logging.error(f"Error clearing images: {e}")
+        return jsonify({"error": f"Failed to clear images: {str(e)}"}), 500
+
+@app.route("/images/<filename>", methods=["GET"])
+def serve_crawled_image(filename):
+    """Serve crawled images"""
+    try:
+        return send_from_directory(IMAGES_DIR, filename)
+    except Exception as e:
+        logging.error(f"Error serving image {filename}: {e}")
+        return jsonify({"error": "Image not found"}), 404
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
